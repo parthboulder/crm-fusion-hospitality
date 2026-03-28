@@ -1,0 +1,37 @@
+{
+  "name": "fusion-hospitality",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --parallel -r dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @fusion/db generate",
+    "db:migrate": "pnpm --filter @fusion/db migrate:dev",
+    "db:push": "pnpm --filter @fusion/db db:push",
+    "db:studio": "pnpm --filter @fusion/db studio"
+  },
+  "devDependencies": {
+    "@types/pdf-parse": "^1.1.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "argon2"
+    ]
+  },
+  "dependencies": {
+    "@mistralai/mistralai": "^2.1.2",
+    "pdf-parse": "1.1.1"
+  }
+}

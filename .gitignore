@@ -1,0 +1,52 @@
+node_modules/
+dist/
+build/
+.turbo/
+.next/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Supabase
+supabase/.temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Temp
+.tmp/
+tmp/
+
+# Build artifacts
+*.tsbuildinfo
+
+# Python venv
+.venv/
+__pycache__/
+*.pyc
+
+# Scan output (generated)
+apps/web/public/data/output.json
+apps/web/public/data/scan-progress.json
+data/
+
+# PaddleOCR model cache
+.paddleocr/
+
+# OneDrive report data (large PDFs)
+OneDrive_*/
+*.png
+
+# Dev env files
+apps/web/.env.development
