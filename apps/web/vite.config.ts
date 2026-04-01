@@ -41,6 +41,8 @@ function servePdfsPlugin() {
 }
 
 export default defineConfig({
+  // Load .env from monorepo root (single .env for everything)
+  envDir: path.resolve(__dirname, '../..'),
   plugins: [react(), servePdfsPlugin(), scannerMiddlewarePlugin()],
   resolve: {
     alias: {
@@ -49,16 +51,5 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    proxy: {
-      // Forward non-scanner API calls to the backend if it's running
-      '/api/v1': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-        // Don't fail if API server isn't running
-        configure: (proxy) => {
-          proxy.on('error', () => {});
-        },
-      },
-    },
   },
 });
