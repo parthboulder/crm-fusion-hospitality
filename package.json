@@ -13,6 +13,7 @@
     "db:studio": "pnpm --filter @fusion/db studio"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/pdf-parse": "^1.1.5",
     "tsx": "^4.21.0",
     "typescript": "^5.4.5"
@@ -32,6 +33,7 @@
   },
   "dependencies": {
     "@mistralai/mistralai": "^2.1.2",
+    "adm-zip": "^0.5.17",
     "pdf-parse": "1.1.1"
   }
 }

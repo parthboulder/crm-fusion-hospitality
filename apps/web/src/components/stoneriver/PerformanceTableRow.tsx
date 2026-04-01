@@ -24,36 +24,36 @@ const cellMuted = `${cell} text-[#6b7280]`;
 
 function occColor(occ: number | null): string {
   if (occ == null) return 'text-[#9ca3af]';
-  if (occ >= 70) return 'text-[#16a34a] font-semibold';
-  if (occ >= 50) return 'text-[#ca8a04] font-semibold';
+  if (occ >= 70) return 'text-[#1a1a1a] font-semibold';
+  if (occ >= 50) return 'text-[#6b7280] font-semibold';
   return 'text-[#dc2626] font-semibold';
 }
 
 function adrColor(adr: number | null): string {
   if (adr == null) return 'text-[#9ca3af]';
-  if (adr >= 130) return 'text-[#7c3aed] font-semibold';
-  if (adr >= 100) return 'text-[#2563eb] font-semibold';
+  if (adr >= 130) return 'text-[#1a1a1a] font-semibold';
+  if (adr >= 100) return 'text-[#1a1a1a] font-semibold';
   return 'text-[#1a1a1a]';
 }
 
 function revparColor(revpar: number | null): string {
   if (revpar == null) return 'text-[#9ca3af]';
-  if (revpar >= 120) return 'text-[#7c3aed] font-semibold';
-  if (revpar >= 80) return 'text-[#2563eb]';
+  if (revpar >= 120) return 'text-[#1a1a1a] font-semibold';
+  if (revpar >= 80) return 'text-[#1a1a1a]';
   return 'text-[#1a1a1a]';
 }
 
 function revenueColor(rev: number | null): string {
   if (rev == null) return 'text-[#9ca3af]';
-  if (rev >= 15000) return 'text-[#16a34a] font-semibold';
-  if (rev >= 10000) return 'text-[#2563eb] font-medium';
+  if (rev >= 15000) return 'text-[#1a1a1a] font-semibold';
+  if (rev >= 10000) return 'text-[#1a1a1a] font-medium';
   return 'text-[#1a1a1a]';
 }
 
 function varianceColor(current: number | null, prior: number | null): string {
   if (current == null || prior == null) return 'text-[#9ca3af]';
   const diff = current - prior;
-  if (diff >= 0) return 'text-[#16a34a]';
+  if (diff >= 0) return 'text-[#1a1a1a]';
   return 'text-[#dc2626]';
 }
 

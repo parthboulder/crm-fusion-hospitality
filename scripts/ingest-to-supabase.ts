@@ -39,8 +39,10 @@ const KNOWN_PROPERTIES = [
   'Holiday Inn Express Tupelo', 'Holiday Inn Tupelo', 'Four Points Memphis Southwind',
   'Best Western Tupelo', 'Surestay Tupelo', 'SureStay Tupelo', 'Hyatt Place Biloxi',
   'Comfort Inn Tupelo', 'Hilton Garden Inn Olive Branch', 'TownePlace Suites',
-  'Best Western Plus Olive Branch', 'Home 2 Suites by Hilton Tupelo', 'Home2 Suites by Hilton Tupelo',
-  'Tru by Hilton Tupelo', 'Holiday Inn Meridian', 'Hilton Garden Inn Meridian',
+  'Best Western Plus Olive Branch', 'Best Western Plus DeSoto',
+  'Home 2 Suites by Hilton Tupelo', 'Home2 Suites by Hilton Tupelo',
+  'Tru by Hilton Tupelo', 'Tru by Hilton Tueplo', // OCR typo variant
+  'Holiday Inn Meridian', 'Hilton Garden Inn Meridian',
   'Hampton Inn Meridian', 'Hampton Inn Vicksburg', 'DoubleTree Biloxi', 'Hilton Garden Inn Madison',
 ];
 
@@ -50,6 +52,8 @@ const NAME_MAP: Record<string, string> = {
   'Home 2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
   'Home2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
   'Tru by Hilton Tupelo': 'Tru By Hilton Tupelo',
+  'Tru by Hilton Tueplo': 'Tru By Hilton Tupelo', // OCR typo
+  'Best Western Plus DeSoto': 'Best Western Plus Olive Branch',
 };
 
 const GROUP_MAP: Record<string, string> = {
@@ -65,7 +69,7 @@ const GROUP_MAP: Record<string, string> = {
 
 function parseNum(s: string | undefined): number | null {
   if (!s) return null;
-  let c = s.replace(/[$,%\s]/g, '').replace(/,/g, '');
+  let c = s.replace(/[$,%\s]/g, '');
   if (c.startsWith('(') && c.endsWith(')')) c = '-' + c.slice(1, -1);
   const v = parseFloat(c);
   return isNaN(v) ? null : v;
@@ -74,9 +78,10 @@ function parseNum(s: string | undefined): number | null {
 function parsePct(s: string | undefined): number | null {
   if (!s) return null;
   const v = parseFloat(s.replace(/[%\s]/g, ''));
-  if (isNaN(v) || v < 0) return null;
-  if (v > 0 && v <= 1) return v * 100;
-  return v > 100 ? null : v;
+  if (isNaN(v)) return null;
+  // Decimal fraction (0.42 = 42%, 1.00 = 100%) — hotel occupancy is never truly <= 1%
+  if (v > 0 && v <= 1) return Math.round(v * 10000) / 100;
+  return v;
 }
 
 function parseRevenueFlash(text: string, date: string): any[] {
@@ -95,7 +100,9 @@ function parseRevenueFlash(text: string, date: string): any[] {
     if (!matched) continue;
     const canonical = NAME_MAP[matched] ?? matched;
     if (seen.has(canonical)) continue;
-    const tokens = remainder.match(/\(?\$?[\d,]+\.?\d*%?\)?/g) ?? [];
+    // Fix OCR artifacts: double dots (e.g. "106..46" → "106.46")
+    const cleaned = remainder.replace(/\.{2,}/g, '.');
+    const tokens = cleaned.match(/\(?\$?[\d,]+\.?\d*%?\)?/g) ?? [];
     if (tokens.length < 8) continue;
     seen.add(canonical);
     rows.push({
@@ -151,14 +158,18 @@ function parseFlashReport(text: string, date: string): any[] {
         const cells = line.split('\t');
         const label = cells[0]?.trim() || cells[1]?.trim() || '';
         const dataCells = cells.slice(2).map((c: string) => c.trim());
+        // Stop before Portfolio Total summary rows that would overwrite per-property data
+        if (/^(Portfolio Total|Total Outstanding)/i.test(label)) break;
         if (label === 'DBA') dbaRow = dataCells;
         else if (label === 'Entity Name' || label === 'Date' || /^\d{2}\/\d{2}\/\d{4}/.test(label)) {}
-        else if (label === 'Total' || (!cells[0]?.trim() && !cells[1]?.trim() && dataCells[0])) metricRows.push({ label: 'AR Total', cells: dataCells });
+        else if (label === 'Total' || (!cells[0]?.trim() && !cells[1]?.trim() && dataCells[0] && !/^\d{1,2}\/\d{1,2}\/\d{4}/.test(dataCells[0]))) metricRows.push({ label: 'AR Total', cells: dataCells });
         else if (label) metricRows.push({ label, cells: dataCells });
       } else {
         const parts = line.split(/\s{3,}/).map((s: string) => s.trim()).filter(Boolean);
         const label = parts[0] ?? '';
         const cells = parts.slice(1);
+        // Stop before Portfolio Total summary rows
+        if (/^(Portfolio Total|Total Outstanding)/i.test(label)) break;
         if (label === 'DBA') dbaRow = cells;
         else if (label === 'Entity Name' || label === 'Date' || /^\d{1,2}\/\d{1,2}\/\d{4}/.test(label)) {}
         else if (label === 'Total') metricRows.push({ label: 'AR Total', cells });
@@ -198,21 +209,28 @@ const HOTEL_MAP: Record<string, string> = {
   'bw tupelo': 'Best Western Tupelo', 'hie fulton': 'Holiday Inn Express Fulton',
   'hi tupelo': 'Holiday Inn Tupelo', 'comfort inn tupelo': 'Comfort Inn Tupelo',
   'candlewood tupelo': 'Candlewood Suites', 'hie tupelo': 'Holiday Inn Express Tupelo',
-  'tru tupelo': 'Tru By Hilton Tupelo', 'home 2 suites': 'Home2 Suites By Hilton',
+  'tru tupelo': 'Tru By Hilton Tupelo', 'tru by hilton tupelo': 'Tru By Hilton Tupelo',
+  'home 2 suites': 'Home2 Suites By Hilton',
   'hyatt biloxi': 'Hyatt Place Biloxi', 'hyatt place biloxi': 'Hyatt Place Biloxi',
-  'tps olive branch': 'TownePlace Suites', 'hgi olive branch': 'HGI Olive Branch',
+  'tps olive branch': 'TownePlace Suites', 'towneplace olive branch': 'TownePlace Suites',
+  'hgi olive branch': 'HGI Olive Branch',
   'hilton garden inn olive branch': 'HGI Olive Branch', 'bw plus ob': 'Best Western Plus Olive Branch',
+  'best western plus desoto': 'Best Western Plus Olive Branch',
   'hgi madison': 'Hilton Garden Inn Madison', 'holiday inn meridian': 'Holiday Inn Meridian',
   'hampton inn meridian': 'Hampton Inn Meridian', 'hgi meridian': 'Hilton Garden Inn Meridian',
   'hampton inn vicksburg': 'Hampton Inn Vicksburg', 'doubletree biloxi': 'DoubleTree Biloxi',
-  'fp southwind': 'Four Points Memphis Southwind', 'hie southwind': 'Holiday Inn Express Memphis Southwind',
+  'fp southwind': 'Four Points Memphis Southwind', 'four points memphis southwind': 'Four Points Memphis Southwind',
+  'hie southwind': 'Holiday Inn Express Memphis Southwind',
   'hie memphis southwind': 'Holiday Inn Express Memphis Southwind',
   'surestay tupelo': 'SureStay Hotel',
+  'hie olive branch': 'Holiday Inn Express Olive Branch',
 };
 
 function parseEngineering(text: string, date: string): any[] {
+  // Normalize \r\n inside cells to spaces — prevents phantom rows and truncated reasons
+  const normalized = text.replace(/\r\n/g, ' ').replace(/\r/g, '');
   const rooms: any[] = [];
-  const sheets = text.split(/=== Sheet:\s*/);
+  const sheets = normalized.split(/=== Sheet:\s*/);
   for (const sheet of sheets) {
     const firstLine = sheet.split('\n')[0]?.trim() ?? '';
     const isLongTerm = firstLine.includes('Long Term');

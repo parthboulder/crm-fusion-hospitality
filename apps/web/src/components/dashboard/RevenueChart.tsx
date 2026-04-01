@@ -51,7 +51,7 @@ export function RevenueChart() {
         <h2 className="text-sm font-medium text-neutral-700">Revenue — Last 30 Days</h2>
         <div className="flex items-center gap-4 text-xs text-neutral-400">
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-px bg-brand-500 inline-block" /> Current
+            <span className="w-3 h-px bg-[#1a1a1a] inline-block" /> Current
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-px bg-neutral-300 inline-block" /> Prior Year
@@ -63,8 +63,8 @@ export function RevenueChart() {
         <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
           <defs>
             <linearGradient id="gradRevenue" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#6172f3" stopOpacity={0.12} />
-              <stop offset="95%" stopColor="#6172f3" stopOpacity={0} />
+              <stop offset="5%" stopColor="#1a1a1a" stopOpacity={0.12} />
+              <stop offset="95%" stopColor="#1a1a1a" stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
@@ -102,7 +102,7 @@ export function RevenueChart() {
           <Area
             type="monotone"
             dataKey="revenue"
-            stroke="#6172f3"
+            stroke="#1a1a1a"
             strokeWidth={2}
             fill="url(#gradRevenue)"
             dot={false}

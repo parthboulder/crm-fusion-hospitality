@@ -97,7 +97,7 @@ export function FlashReportTable({
         <table className="w-full text-[11px] border-collapse" style={{ fontVariantNumeric: 'tabular-nums', minWidth: viewSection === 'all' ? 1500 : 600 }}>
           <thead>
             <tr className="bg-[#1f2937]">
-              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] sticky left-0 z-10" rowSpan={2}>
+              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] sticky left-0 z-10 min-w-[180px]">
                 {displayDate}
               </th>
               {showOps && <SectionHeader label="Operating Metrics" colSpan={5} />}
@@ -105,6 +105,7 @@ export function FlashReportTable({
               {showAR && <SectionHeader label="Accounts Receivable" colSpan={6} />}
             </tr>
             <tr className="bg-[#f9fafb] border-b border-[#e5e5e5]">
+              <th className="sticky left-0 bg-[#f9fafb] z-10 min-w-[180px]" />
               {showOps && <>
                 <th className={`${thRight} border-l border-[#e5e5e5]`}>Occ%</th>
                 <th className={thRight}>ADR</th>

@@ -20,15 +20,15 @@ const cellMuted = `${cell} text-[#6b7280]`;
 
 function occColor(v: number | null): string {
   if (v == null) return 'text-[#9ca3af]';
-  if (v >= 70) return 'text-[#16a34a] font-semibold';
-  if (v >= 50) return 'text-[#ca8a04] font-semibold';
+  if (v >= 70) return 'text-[#1a1a1a] font-semibold';
+  if (v >= 50) return 'text-[#6b7280] font-semibold';
   return 'text-[#dc2626] font-semibold';
 }
 
 function arColor(v: number | null): string {
   if (v == null || v === 0) return 'text-[#9ca3af]';
   if (v > 50000) return 'text-[#dc2626] font-semibold';
-  if (v > 10000) return 'text-[#ca8a04]';
+  if (v > 10000) return 'text-[#6b7280]';
   return 'text-[#1a1a1a]';
 }
 

@@ -106,7 +106,7 @@ export function PerformanceTable({
           {/* Two-level header: section labels, then column labels */}
           <thead>
             <tr className="bg-[#1f2937]">
-              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] sticky left-0 z-10" rowSpan={2}>
+              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] sticky left-0 z-10 min-w-[180px]">
                 {displayDate}
               </th>
               {showDay && <SectionHeader label="Date" colSpan={8} />}
@@ -114,6 +114,7 @@ export function PerformanceTable({
               {showYtd && <SectionHeader label="Year to Date" colSpan={6} />}
             </tr>
             <tr className="bg-[#f9fafb] border-b border-[#e5e5e5]">
+              <th className="sticky left-0 bg-[#f9fafb] z-10 min-w-[180px]" />
               {/* Day columns */}
               {showDay && <>
                 <th className={`${thRight} border-l border-[#e5e5e5]`}>Occ%</th>

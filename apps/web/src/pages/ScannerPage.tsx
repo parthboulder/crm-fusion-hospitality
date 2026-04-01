@@ -4,13 +4,16 @@
  * Two views: Table view (filterable flat list) and Folder view (date → property folder → files).
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   ArrowPathIcon,
+  ArrowDownTrayIcon,
   CloudArrowUpIcon,
   TableCellsIcon,
   FolderOpenIcon,
+  XMarkIcon,
+  DocumentChartBarIcon,
 } from '@heroicons/react/24/outline';
 import { clsx } from 'clsx';
 import { ScannerStats } from '../components/scanner/ScannerStats';
@@ -19,6 +22,7 @@ import { FileDetailPanel } from '../components/scanner/FileDetailPanel';
 import { PropertyFolderBrowser } from '../components/scanner/PropertyFolderBrowser';
 import { ScanControls } from '../components/scanner/ScanControls';
 import type { ScanSummary, FlatResult } from '../components/scanner/types';
+import { exportReportPdfs, type ReportType } from '../lib/export-report-pdfs';
 
 type MainView = 'table' | 'folders';
 
@@ -26,6 +30,14 @@ export function ScannerPage() {
   const [mainView, setMainView] = useState<MainView>('folders');
   const [selectedFile, setSelectedFile] = useState<FlatResult | null>(null);
   const [selectedDate, setSelectedDate] = useState('');
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportStart, setExportStart] = useState('');
+  const [exportEnd, setExportEnd] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const [exportProgress, setExportProgress] = useState('');
+  const [selectedReports, setSelectedReports] = useState<Set<ReportType>>(new Set(['revenue-flash', 'flash-report', 'engineering']));
+  const modalRef = useRef<HTMLDivElement>(null);
 
   // Load the scan output JSON from public/data or served statically
   const { data: summary, isLoading, error, refetch } = useQuery<ScanSummary>({
@@ -47,6 +59,48 @@ export function ScannerPage() {
   const handleScanComplete = useCallback(() => {
     refetch();
   }, [refetch]);
+
+  const handleExportOpen = useCallback(() => {
+    const dates = summary?.allDates ?? [];
+    setExportStart(dates[0] ?? '');
+    setExportEnd(dates[dates.length - 1] ?? '');
+    setExportError('');
+    setExportProgress('');
+    setSelectedReports(new Set(['revenue-flash', 'flash-report', 'engineering']));
+    setShowExportModal(true);
+  }, [summary]);
+
+  const toggleReport = useCallback((type: ReportType) => {
+    setSelectedReports((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type); else next.add(type);
+      return next;
+    });
+  }, []);
+
+  const handleExportDownload = useCallback(async () => {
+    if (!exportStart || !exportEnd) { setExportError('Select both start and end dates'); return; }
+    if (exportStart > exportEnd) { setExportError('Start date must be before end date'); return; }
+    if (selectedReports.size === 0) { setExportError('Select at least one report type'); return; }
+
+    setExporting(true);
+    setExportError('');
+    setExportProgress('Fetching data...');
+    try {
+      await exportReportPdfs(
+        [...selectedReports],
+        exportStart,
+        exportEnd,
+        (p) => setExportProgress(`${p.label} (${p.current}/${p.total})`),
+      );
+      setShowExportModal(false);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExporting(false);
+      setExportProgress('');
+    }
+  }, [exportStart, exportEnd, selectedReports]);
 
   const allResults = summary?.results ?? [];
 
@@ -142,6 +196,11 @@ export function ScannerPage() {
             </select>
           )}
 
+          <button onClick={handleExportOpen} className="btn-secondary !py-1.5">
+            <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+            <span className="text-xs">Export PDF</span>
+          </button>
+
           <button onClick={() => refetch()} className="btn-secondary !py-1.5">
             <ArrowPathIcon className="w-3.5 h-3.5" />
             <span className="text-xs">Refresh</span>
@@ -188,6 +247,121 @@ export function ScannerPage() {
               />
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Export Report PDFs Modal ────────────────────────────────────── */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowExportModal(false); }}
+        >
+          <div ref={modalRef} className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Export Report PDFs</h2>
+                <p className="text-xs text-neutral-500 mt-0.5">Generate performance report PDFs for a date range</p>
+              </div>
+              <button onClick={() => setShowExportModal(false)} className="p-1 rounded hover:bg-neutral-100">
+                <XMarkIcon className="w-5 h-5 text-neutral-400" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="px-5 py-4 space-y-4">
+              {/* Available dates hint */}
+              {summary && summary.allDates.length > 0 && (
+                <p className="text-xs text-neutral-400">
+                  Available dates: {summary.allDates[0]} to {summary.allDates[summary.allDates.length - 1]}
+                  {' '}({summary.allDates.length} date{summary.allDates.length !== 1 ? 's' : ''})
+                </p>
+              )}
+
+              {/* Date range */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-700 mb-1">Start Date</label>
+                  <input
+                    type="date"
+                    value={exportStart}
+                    onChange={(e) => setExportStart(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-700 mb-1">End Date</label>
+                  <input
+                    type="date"
+                    value={exportEnd}
+                    onChange={(e) => setExportEnd(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-neutral-200 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500"
+                  />
+                </div>
+              </div>
+
+              {/* Report type checkboxes */}
+              <div>
+                <label className="block text-xs font-medium text-neutral-700 mb-2">Reports to export</label>
+                <div className="space-y-2">
+                  {([
+                    { key: 'revenue-flash' as ReportType, label: 'Revenue Flash', desc: 'Daily occupancy, ADR, RevPAR, revenue by property' },
+                    { key: 'flash-report' as ReportType, label: 'Flash Report', desc: 'Operating metrics, room status, AR aging' },
+                    { key: 'engineering' as ReportType, label: 'Engineering Flash', desc: 'OOO rooms summary and details' },
+                  ]).map(({ key, label, desc }) => (
+                    <label key={key} className="flex items-start gap-2 cursor-pointer group">
+                      <input
+                        type="checkbox"
+                        checked={selectedReports.has(key)}
+                        onChange={() => toggleReport(key)}
+                        className="mt-0.5 rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                      />
+                      <div>
+                        <span className="text-xs font-medium text-neutral-800 group-hover:text-brand-700">{label}</span>
+                        <p className="text-[10px] text-neutral-400 leading-tight">{desc}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Info */}
+              {exportStart && exportEnd && exportStart <= exportEnd && (
+                <p className="text-xs text-neutral-500">
+                  <DocumentChartBarIcon className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />
+                  {selectedReports.size} PDF{selectedReports.size !== 1 ? 's' : ''} will be generated, each containing
+                  {' '}{(summary?.allDates ?? []).filter((d) => d >= exportStart && d <= exportEnd).length} date page(s)
+                </p>
+              )}
+
+              {/* Progress */}
+              {exportProgress && (
+                <p className="text-xs text-blue-600 bg-blue-50 px-3 py-2 rounded">{exportProgress}</p>
+              )}
+
+              {exportError && (
+                <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded">{exportError}</p>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-neutral-200 bg-neutral-50">
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="px-4 py-2 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-md hover:bg-neutral-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExportDownload}
+                disabled={exporting || !exportStart || !exportEnd || selectedReports.size === 0}
+                className="px-4 py-2 text-xs font-medium text-white bg-brand-600 rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                {exporting ? 'Generating...' : 'Export PDFs'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

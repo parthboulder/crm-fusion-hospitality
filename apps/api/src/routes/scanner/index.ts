@@ -215,13 +215,23 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ success: false, message: 'folderName is required' });
     }
 
-    const { existsSync } = await import('fs');
+    const { existsSync, readdirSync } = await import('fs');
     const os = await import('os');
     const homeDir = os.homedir();
 
     const { fileURLToPath: toPath } = await import('url');
     const routeDir = path.dirname(toPath(import.meta.url));
     const projectRoot = path.resolve(routeDir, '..', '..', '..', '..');
+
+    // Discover all OneDrive roots (personal + business accounts)
+    const oneDriveRoots: string[] = [];
+    try {
+      for (const entry of readdirSync(homeDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && /^OneDrive/i.test(entry.name)) {
+          oneDriveRoots.push(path.join(homeDir, entry.name));
+        }
+      }
+    } catch { /* ignore */ }
 
     // Direct matches in common locations
     const candidates = [
@@ -230,8 +240,7 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
       path.join(homeDir, 'Downloads', 'crm-fusion-hospitality', folderName),
       path.join(homeDir, 'Desktop', folderName),
       path.join(homeDir, 'Documents', folderName),
-      path.join(homeDir, 'OneDrive', folderName),
-      path.join(homeDir, 'OneDrive - Fusion Hospitality', folderName),
+      ...oneDriveRoots.map((root) => path.join(root, folderName)),
       path.join(process.cwd(), folderName),
     ];
 
@@ -242,8 +251,13 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Recursive search: find any folder matching this name under common roots (max 3 levels deep)
-    const { readdirSync, statSync } = await import('fs');
-    const searchRoots = [projectRoot, path.join(homeDir, 'Downloads'), path.join(homeDir, 'Desktop'), path.join(homeDir, 'Documents')];
+    const searchRoots = [
+      projectRoot,
+      path.join(homeDir, 'Downloads'),
+      path.join(homeDir, 'Desktop'),
+      path.join(homeDir, 'Documents'),
+      ...oneDriveRoots,
+    ];
 
     function findFolder(dir: string, name: string, depth: number): string | null {
       if (depth > 3) return null;

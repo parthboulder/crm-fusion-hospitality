@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import AdmZip from 'adm-zip';
 
 // OCR-V1 imports
 import { extractPdfText } from '../OCR-V1-/lib/ocr/pdfTextExtractor.js';
@@ -243,6 +244,73 @@ function parseDateFolder(name: string): string | null {
   const match = name.match(/^(\d{2})(\d{2})(\d{4})$/);
   if (!match) return null;
   return `${match[3]}-${match[1]}-${match[2]}`;
+}
+
+// ─── Zip extraction & nested folder flattening ─────────────────────────────
+
+const ZIP_EXTS = new Set(['.zip']);
+
+/**
+ * Extract all zip files in a directory into subfolders (in-place, inside a
+ * temp working copy).  Each zip `Foo.zip` is extracted to `Foo/`.
+ * Only extracts scannable file types to avoid dumping gigabytes of irrelevant
+ * data.  Returns the number of zips processed.
+ */
+function extractZipsInDir(dirPath: string): number {
+  let count = 0;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!ZIP_EXTS.has(ext)) continue;
+
+    const zipPath = path.join(dirPath, entry.name);
+    const destName = entry.name.replace(/\.zip$/i, '');
+    const destDir = path.join(dirPath, destName);
+
+    try {
+      const zip = new AdmZip(zipPath);
+      const zipEntries = zip.getEntries();
+      const SCANNABLE = new Set(['.pdf', '.xlsx', '.xls', '.csv', '.ods', '.tsv']);
+
+      for (const ze of zipEntries) {
+        if (ze.isDirectory) continue;
+        const zeExt = path.extname(ze.entryName).toLowerCase();
+        if (!SCANNABLE.has(zeExt)) continue;
+
+        // Flatten nested dirs inside the zip — put all files directly in destDir
+        const baseName = path.basename(ze.entryName);
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+        fs.writeFileSync(path.join(destDir, baseName), ze.getData());
+      }
+      count++;
+    } catch (err) {
+      console.warn(`  ⚠ Failed to extract ${entry.name}: ${(err as Error).message}`);
+    }
+  }
+  return count;
+}
+
+/**
+ * Resolve the effective content directory for a date folder.
+ * Handles the case where a date folder contains a single nested subfolder
+ * with the same MMDDYYYY name (e.g. `03312026/03312026/`).
+ * Returns the path that actually contains property folders / files.
+ */
+function resolveNestedDateDir(dateFolderPath: string, rawName: string): string {
+  const inner = path.join(dateFolderPath, rawName);
+  if (fs.existsSync(inner) && fs.statSync(inner).isDirectory()) {
+    // Check that the inner folder actually has content (dirs or scannable files)
+    const innerEntries = fs.readdirSync(inner, { withFileTypes: true });
+    const hasContent = innerEntries.some((e) =>
+      e.isDirectory() || ['.pdf', '.xlsx', '.xls', '.csv', '.ods', '.tsv'].includes(path.extname(e.name).toLowerCase()),
+    );
+    if (hasContent) {
+      console.log(`    ↳ Nested date folder detected — using ${rawName}/${rawName}/`);
+      return inner;
+    }
+  }
+  return dateFolderPath;
 }
 
 function matchProperty(folderName: string): { code: string; name: string; confidence: number } | null {
@@ -581,8 +649,24 @@ async function scanFolder(rootPath: string, concurrency: number, numWorkers: num
   let totalPdfEstimate = 0;
   let totalSpreadsheetEstimate = 0;
 
+  // Pre-pass: extract zips and resolve nested date folders before estimation
   for (const dd of dateDirs) {
     const dp = path.join(scanBase, dd.name);
+    try {
+      // 1. Flatten nested date folder (e.g. 03312026/03312026/ → use inner)
+      const effective = resolveNestedDateDir(dp, dd.name);
+
+      // 2. Extract zips in the effective directory
+      const zipsExtracted = extractZipsInDir(effective);
+      if (zipsExtracted > 0) console.log(`    ↳ Extracted ${zipsExtracted} zip(s) in ${dd.name}`);
+    } catch (err) {
+      console.warn(`  ⚠ Pre-pass error for ${dd.name}: ${(err as Error).message}`);
+    }
+  }
+
+  // Count files after zip extraction & nested folder resolution
+  for (const dd of dateDirs) {
+    const dp = resolveNestedDateDir(path.join(scanBase, dd.name), dd.name);
     try {
       const entries = fs.readdirSync(dp, { withFileTypes: true });
       for (const e of entries.filter((e) => e.isFile())) {
@@ -620,7 +704,9 @@ async function scanFolder(rootPath: string, concurrency: number, numWorkers: num
     dateIndex++;
 
     console.log(`  Processing ${dateDir.name} (${normalizedDate})...`);
-    const dateFolderPath = path.join(scanBase, dateDir.name);
+    const rawDateFolderPath = path.join(scanBase, dateDir.name);
+    // Resolve nested date folders (e.g. 03312026/03312026/) and use extracted zip content
+    const dateFolderPath = resolveNestedDateDir(rawDateFolderPath, dateDir.name);
     const dateEntries = fs.readdirSync(dateFolderPath, { withFileTypes: true });
 
     const propertyFolders: PropertyFolder[] = [];
@@ -797,6 +883,50 @@ async function scanFolder(rootPath: string, concurrency: number, numWorkers: num
   };
 }
 
+// ─── Merge logic — preserve previous scan data ─────────────────────────────
+
+function mergeScanSummaries(existing: ScanSummary, incoming: ScanSummary): ScanSummary {
+  // New scan dates replace old data for the same dates (re-scan updates);
+  // dates that only exist in the old scan are preserved.
+  const incomingDates = new Set(incoming.allDates);
+
+  // Keep old results whose date is NOT in the new scan
+  const preservedResults = existing.results.filter((r) => !incomingDates.has(r.dateFolder));
+  const mergedResults = [...preservedResults, ...incoming.results];
+
+  // Merge dateFolders the same way
+  const preservedDateFolders = existing.dateFolders.filter((df) => !incomingDates.has(df.normalizedDate));
+  const mergedDateFolders = [...preservedDateFolders, ...incoming.dateFolders].sort((a, b) => a.normalizedDate.localeCompare(b.normalizedDate));
+
+  // Recompute aggregate counts
+  const categoryCounts: Record<string, number> = {};
+  const reportTypeCounts: Record<string, number> = {};
+  const propertyCounts: Record<string, number> = {};
+  for (const r of mergedResults) {
+    categoryCounts[r.reportTypeCategory] = (categoryCounts[r.reportTypeCategory] ?? 0) + 1;
+    reportTypeCounts[r.reportType] = (reportTypeCounts[r.reportType] ?? 0) + 1;
+    if (r.property) propertyCounts[r.property] = (propertyCounts[r.property] ?? 0) + 1;
+  }
+
+  return {
+    scanRoot: incoming.scanRoot,
+    scannedAt: incoming.scannedAt,
+    executionTimeMs: incoming.executionTimeMs,
+    totalFiles: mergedResults.length,
+    totalPdfs: mergedResults.filter((r) => r.extension === '.pdf').length,
+    totalParsed: existing.totalParsed + incoming.totalParsed,
+    totalErrors: mergedResults.filter((r) => r.error !== null).length,
+    totalWithAdr: mergedResults.filter((r) => r.adrNumber !== null).length,
+    dateFolders: mergedDateFolders,
+    categoryCounts,
+    reportTypeCounts,
+    propertyCounts,
+    allDates: mergedDateFolders.map((d) => d.normalizedDate),
+    allProperties: [...new Set(mergedResults.map((r) => r.property).filter(Boolean))] as string[],
+    results: mergedResults,
+  };
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -840,10 +970,25 @@ async function main(): Promise<void> {
   console.log(`  Concurrency: ${concurrency}`);
   console.log(`  Workers:     ${numWorkers}\n`);
 
-  const summary = await scanFolder(resolvedPath, concurrency, numWorkers);
+  const newSummary = await scanFolder(resolvedPath, concurrency, numWorkers);
 
+  // Merge with existing output.json — preserve data from previous scans
   const outputDir = path.dirname(outputPath);
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+  let summary = newSummary;
+  try {
+    if (fs.existsSync(outputPath)) {
+      const existing: ScanSummary = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+      if (existing.results?.length > 0) {
+        summary = mergeScanSummaries(existing, newSummary);
+        console.log(`  Merged with previous scan: ${existing.results.length} existing + ${newSummary.results.length} new → ${summary.results.length} total`);
+      }
+    }
+  } catch (err) {
+    console.warn(`  ⚠ Could not merge with existing output.json, overwriting: ${(err as Error).message}`);
+  }
+
   fs.writeFileSync(outputPath, JSON.stringify(summary, null, 2), 'utf-8');
 
   const elapsed = (summary.executionTimeMs / 1000).toFixed(1);

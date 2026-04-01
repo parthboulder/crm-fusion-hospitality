@@ -84,8 +84,10 @@ const KNOWN_PROPERTIES = [
   'Holiday Inn Express Tupelo', 'Holiday Inn Tupelo', 'Four Points Memphis Southwind',
   'Best Western Tupelo', 'Surestay Tupelo', 'SureStay Tupelo', 'Hyatt Place Biloxi',
   'Comfort Inn Tupelo', 'Hilton Garden Inn Olive Branch', 'TownePlace Suites',
-  'Best Western Plus Olive Branch', 'Home 2 Suites by Hilton Tupelo', 'Home2 Suites by Hilton Tupelo',
-  'Tru by Hilton Tupelo', 'Holiday Inn Meridian', 'Hilton Garden Inn Meridian',
+  'Best Western Plus Olive Branch', 'Best Western Plus DeSoto',
+  'Home 2 Suites by Hilton Tupelo', 'Home2 Suites by Hilton Tupelo',
+  'Tru by Hilton Tupelo', 'Tru by Hilton Tueplo', // OCR typo variant
+  'Holiday Inn Meridian', 'Hilton Garden Inn Meridian',
   'Hampton Inn Meridian', 'Hampton Inn Vicksburg', 'DoubleTree Biloxi', 'Hilton Garden Inn Madison',
 ];
 
@@ -95,6 +97,8 @@ const NAME_MAP: Record<string, string> = {
   'Home 2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
   'Home2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
   'Tru by Hilton Tupelo': 'Tru By Hilton Tupelo',
+  'Tru by Hilton Tueplo': 'Tru By Hilton Tupelo', // OCR typo
+  'Best Western Plus DeSoto': 'Best Western Plus Olive Branch',
 };
 
 const GROUP_MAP: Record<string, string> = {
@@ -127,23 +131,28 @@ const HOTEL_MAP: Record<string, string> = {
   'bw tupelo': 'Best Western Tupelo', 'hie fulton': 'Holiday Inn Express Fulton',
   'hi tupelo': 'Holiday Inn Tupelo', 'comfort inn tupelo': 'Comfort Inn Tupelo',
   'candlewood tupelo': 'Candlewood Suites', 'hie tupelo': 'Holiday Inn Express Tupelo',
-  'tru tupelo': 'Tru By Hilton Tupelo', 'home 2 suites': 'Home2 Suites By Hilton',
+  'tru tupelo': 'Tru By Hilton Tupelo', 'tru by hilton tupelo': 'Tru By Hilton Tupelo',
+  'home 2 suites': 'Home2 Suites By Hilton',
   'hyatt biloxi': 'Hyatt Place Biloxi', 'hyatt place biloxi': 'Hyatt Place Biloxi',
-  'tps olive branch': 'TownePlace Suites', 'hgi olive branch': 'HGI Olive Branch',
+  'tps olive branch': 'TownePlace Suites', 'towneplace olive branch': 'TownePlace Suites',
+  'hgi olive branch': 'HGI Olive Branch',
   'hilton garden inn olive branch': 'HGI Olive Branch', 'bw plus ob': 'Best Western Plus Olive Branch',
+  'best western plus desoto': 'Best Western Plus Olive Branch',
   'hgi madison': 'Hilton Garden Inn Madison', 'holiday inn meridian': 'Holiday Inn Meridian',
   'hampton inn meridian': 'Hampton Inn Meridian', 'hgi meridian': 'Hilton Garden Inn Meridian',
   'hampton inn vicksburg': 'Hampton Inn Vicksburg', 'doubletree biloxi': 'DoubleTree Biloxi',
-  'fp southwind': 'Four Points Memphis Southwind', 'hie southwind': 'Holiday Inn Express Memphis Southwind',
+  'fp southwind': 'Four Points Memphis Southwind', 'four points memphis southwind': 'Four Points Memphis Southwind',
+  'hie southwind': 'Holiday Inn Express Memphis Southwind',
   'hie memphis southwind': 'Holiday Inn Express Memphis Southwind',
   'surestay tupelo': 'SureStay Hotel',
+  'hie olive branch': 'Holiday Inn Express Olive Branch',
 };
 
 // ── Parsers ────────────────────────────────────────────────────────────────
 
 function parseNum(s: string | undefined): number | null {
   if (!s) return null;
-  let c = s.replace(/[$,%\s]/g, '').replace(/,/g, '');
+  let c = s.replace(/[$,%\s]/g, '');
   if (c.startsWith('(') && c.endsWith(')')) c = '-' + c.slice(1, -1);
   const v = parseFloat(c);
   return isNaN(v) ? null : v;
@@ -152,9 +161,10 @@ function parseNum(s: string | undefined): number | null {
 function parsePct(s: string | undefined): number | null {
   if (!s) return null;
   const v = parseFloat(s.replace(/[%\s]/g, ''));
-  if (isNaN(v) || v < 0) return null;
-  if (v > 0 && v <= 1) return v * 100;
-  return v > 100 ? null : v;
+  if (isNaN(v)) return null;
+  // Decimal fraction (0.42 = 42%, 1.00 = 100%) — hotel occupancy is never truly <= 1%
+  if (v > 0 && v <= 1) return Math.round(v * 10000) / 100;
+  return v;
 }
 
 function parseRevenueFlash(text: string, date: string): Record<string, unknown>[] {
@@ -173,7 +183,9 @@ function parseRevenueFlash(text: string, date: string): Record<string, unknown>[
     if (!matched) continue;
     const canonical = NAME_MAP[matched] ?? matched;
     if (seen.has(canonical)) continue;
-    const tokens = remainder.match(/\(?\$?[\d,]+\.?\d*%?\)?/g) ?? [];
+    // Fix OCR artifacts: double dots (e.g. "106..46" → "106.46")
+    const cleaned = remainder.replace(/\.{2,}/g, '.');
+    const tokens = cleaned.match(/\(?\$?[\d,]+\.?\d*%?\)?/g) ?? [];
     if (tokens.length < 8) continue;
     seen.add(canonical);
     rows.push({
@@ -211,14 +223,18 @@ function parseFlashReport(text: string, date: string): Record<string, unknown>[]
         const cells = line.split('\t');
         const label = cells[0]?.trim() || cells[1]?.trim() || '';
         const dataCells = cells.slice(2).map((c: string) => c.trim());
+        // Stop before Portfolio Total summary rows that would overwrite per-property data
+        if (/^(Portfolio Total|Total Outstanding)/i.test(label)) break;
         if (label === 'DBA') dbaRow = dataCells;
         else if (label === 'Entity Name' || label === 'Date' || /^\d{2}\/\d{2}\/\d{4}/.test(label)) { /* skip */ }
-        else if (label === 'Total' || (!cells[0]?.trim() && !cells[1]?.trim() && dataCells[0])) metricRows.push({ label: 'AR Total', cells: dataCells });
+        else if (label === 'Total' || (!cells[0]?.trim() && !cells[1]?.trim() && dataCells[0] && !/^\d{1,2}\/\d{1,2}\/\d{4}/.test(dataCells[0]))) metricRows.push({ label: 'AR Total', cells: dataCells });
         else if (label) metricRows.push({ label, cells: dataCells });
       } else {
         const parts = line.split(/\s{3,}/).map((s: string) => s.trim()).filter(Boolean);
         const label = parts[0] ?? '';
         const cells = parts.slice(1);
+        // Stop before Portfolio Total summary rows
+        if (/^(Portfolio Total|Total Outstanding)/i.test(label)) break;
         if (label === 'DBA') dbaRow = cells;
         else if (label === 'Entity Name' || label === 'Date' || /^\d{1,2}\/\d{1,2}\/\d{4}/.test(label)) { /* skip */ }
         else if (label === 'Total') metricRows.push({ label: 'AR Total', cells });
@@ -253,8 +269,10 @@ function parseFlashReport(text: string, date: string): Record<string, unknown>[]
 }
 
 function parseEngineering(text: string, date: string): Record<string, unknown>[] {
+  // Normalize \r\n inside cells to spaces — prevents phantom rows and truncated reasons
+  const normalized = text.replace(/\r\n/g, ' ').replace(/\r/g, '');
   const rooms: Record<string, unknown>[] = [];
-  const sheets = text.split(/=== Sheet:\s*/);
+  const sheets = normalized.split(/=== Sheet:\s*/);
   for (const sheet of sheets) {
     const firstLine = sheet.split('\n')[0]?.trim() ?? '';
     const isLongTerm = firstLine.includes('Long Term');
@@ -283,20 +301,38 @@ async function handleResolveFolder(req: IncomingMessage, res: ServerResponse) {
   if (!folderName) return json(res, 400, { success: false, message: 'folderName is required' });
 
   const homeDir = os.homedir();
+
+  // Discover all OneDrive roots (personal + business accounts)
+  const oneDriveRoots: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(homeDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && /^OneDrive/i.test(entry.name)) {
+        oneDriveRoots.push(path.join(homeDir, entry.name));
+      }
+    }
+  } catch { /* ignore */ }
+
   const candidates = [
     path.join(projectRoot, folderName),
     path.join(homeDir, 'Downloads', folderName),
     path.join(homeDir, 'Downloads', 'crm-fusion-hospitality', folderName),
     path.join(homeDir, 'Desktop', folderName),
     path.join(homeDir, 'Documents', folderName),
-    path.join(homeDir, 'OneDrive', folderName),
+    // All discovered OneDrive roots (personal, business, shared)
+    ...oneDriveRoots.map((root) => path.join(root, folderName)),
   ];
 
   for (const c of candidates) {
     if (fs.existsSync(c)) return json(res, 200, { success: true, folderPath: c });
   }
 
-  const searchRoots = [projectRoot, path.join(homeDir, 'Downloads'), path.join(homeDir, 'Desktop'), path.join(homeDir, 'Documents')];
+  const searchRoots = [
+    projectRoot,
+    path.join(homeDir, 'Downloads'),
+    path.join(homeDir, 'Desktop'),
+    path.join(homeDir, 'Documents'),
+    ...oneDriveRoots,
+  ];
   for (const root of searchRoots) {
     const found = findFolder(root, folderName, 0);
     if (found) return json(res, 200, { success: true, folderPath: found });
@@ -338,17 +374,14 @@ async function handleStart(req: IncomingMessage, res: ServerResponse) {
   console.log('[scanner/start] node:', process.execPath);
   console.log('[scanner/start] cwd:', projectRoot);
 
-  // Spawn with stderr piped for error logging
+  // Spawn fully detached — stdio must be 'ignore' on Windows to prevent
+  // a console window from flashing open (piped streams keep a handle to
+  // the parent console, defeating windowsHide).
   const child = spawn(process.execPath, [tsxCli, scriptPath, folderPath], {
     cwd: projectRoot,
     detached: true,
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: 'ignore',
     windowsHide: true,
-  });
-
-  // Log stderr so we can see crashes
-  child.stderr?.on('data', (data: Buffer) => {
-    console.error('[scanner/stderr]', data.toString().trim());
   });
 
   child.on('error', (err) => {
@@ -452,7 +485,79 @@ async function handleIngest(_req: IncomingMessage, res: ServerResponse) {
     }
   }
 
-  return json(res, 200, { success: errors.length === 0, data: { dates: allDates.length, revenueFlash: totalRF, flashReport: totalFR, engineering: totalEng, errors } });
+  const totalIngested = totalRF + totalFR + totalEng;
+  const partialSuccess = errors.length > 0 && totalIngested > 0;
+  return json(res, 200, {
+    success: errors.length === 0 || partialSuccess,
+    message: partialSuccess ? `Ingested ${totalIngested} rows with ${errors.length} warning(s)` : undefined,
+    data: { dates: allDates.length, revenueFlash: totalRF, flashReport: totalFR, engineering: totalEng, errors },
+  });
+}
+
+// ── Download files as zip by date range ────────────────────────────────────
+
+async function handleDownload(req: IncomingMessage, res: ServerResponse) {
+  const body = JSON.parse(await readBody(req));
+  const startDate: string | undefined = body?.startDate?.trim();
+  const endDate: string | undefined = body?.endDate?.trim();
+
+  if (!startDate || !endDate) return json(res, 400, { success: false, message: 'startDate and endDate are required (YYYY-MM-DD)' });
+
+  const outputPath = path.join(dataDir, 'output.json');
+  let data: { results: Record<string, unknown>[] };
+  try {
+    data = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  } catch {
+    return json(res, 404, { success: false, message: 'No scan data found. Run a scan first.' });
+  }
+
+  const results = (data.results ?? []).filter((r) => {
+    const d = r['dateFolder'] as string;
+    return d && d >= startDate && d <= endDate;
+  });
+
+  if (results.length === 0) return json(res, 404, { success: false, message: `No files found between ${startDate} and ${endDate}` });
+
+  // Build zip in memory using AdmZip
+  const AdmZip = (await import('adm-zip')).default;
+  const zip = new AdmZip();
+
+  let added = 0;
+  for (const r of results) {
+    const filePath = r['filePath'] as string;
+    const dateFolder = r['dateFolder'] as string;
+    const propertyFolder = r['propertyFolder'] as string;
+    const fileName = r['fileName'] as string;
+
+    if (!filePath) continue;
+
+    // Normalize path separators for the filesystem
+    const normalizedPath = filePath.replace(/\//g, path.sep);
+
+    try {
+      if (!fs.existsSync(normalizedPath)) continue;
+      // Organize in zip as: dateFolder/propertyFolder/fileName
+      const zipDir = propertyFolder && propertyFolder !== '(standalone)'
+        ? `${dateFolder}/${propertyFolder}`
+        : dateFolder;
+      zip.addLocalFile(normalizedPath, zipDir, fileName);
+      added++;
+    } catch {
+      // Skip files we can't read
+    }
+  }
+
+  if (added === 0) return json(res, 404, { success: false, message: 'No files could be read from disk. They may have been moved or deleted.' });
+
+  const zipBuffer = zip.toBuffer();
+  const zipName = `scan-export-${startDate}-to-${endDate}.zip`;
+
+  res.writeHead(200, {
+    'Content-Type': 'application/zip',
+    'Content-Disposition': `attachment; filename="${zipName}"`,
+    'Content-Length': zipBuffer.length.toString(),
+  });
+  res.end(zipBuffer);
 }
 
 // ── Vite plugin export ─────────────────────────────────────────────────────
@@ -485,6 +590,7 @@ export function scannerMiddlewarePlugin() {
           if (route === 'start' && req.method === 'POST') return await handleStart(req, res);
           if (route === 'cancel' && req.method === 'POST') return await handleCancel(req, res);
           if (route === 'ingest' && req.method === 'POST') return await handleIngest(req, res);
+          if (route === 'download' && req.method === 'POST') return await handleDownload(req, res);
           return json(res, 404, { error: 'Not found' });
         } catch (err) {
           console.error('Scanner API error:', err);

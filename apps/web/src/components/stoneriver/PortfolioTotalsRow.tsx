@@ -54,7 +54,7 @@ const tcMuted = `${tc} text-[#6b7280]`;
 
 function varianceColor(current: number | null, prior: number | null): string {
   if (current == null || prior == null) return 'text-[#9ca3af]';
-  return current - prior >= 0 ? 'text-[#16a34a]' : 'text-[#dc2626]';
+  return current - prior >= 0 ? 'text-[#1a1a1a]' : 'text-[#dc2626]';
 }
 
 function TotalCells({ t, showDay = true, showMtd = true, showYtd = true }: {
