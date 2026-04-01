@@ -1,0 +1,10 @@
+[build]
+  base = "apps/web"
+  command = "npm install && npx vite build"
+  publish = "dist"
+
+# SPA: all routes serve index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
