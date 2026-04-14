@@ -10,17 +10,11 @@ const schema = z.object({
   API_HOST: z.string().default('0.0.0.0'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
-  DATABASE_URL: z.string().min(1),
-
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   STORAGE_BUCKET_REPORTS: z.string().default('reports-private'),
   SIGNED_URL_EXPIRY_SECONDS: z.coerce.number().default(900),
-
-  JWT_SECRET: z.string().min(32),
-
-  ANTHROPIC_API_KEY: z.string().min(1),
 
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default('alerts@fusion-hospitality.com'),

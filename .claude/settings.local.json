@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node -e ':*)"
+      "Bash(node -e ':*)",
+      "Bash(pnpm dev:*)",
+      "Bash(echo \"Started dev server in background \\(PID: $!\\)\")",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm db:generate)"
     ]
   }
 }

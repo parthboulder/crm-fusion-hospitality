@@ -15,7 +15,7 @@ export class AiService {
   private readonly model = 'claude-sonnet-4-6';
 
   constructor() {
-    this.client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    this.client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY ?? '' });
   }
 
   // ─── Report Extraction ─────────────────────────────────────────────────────

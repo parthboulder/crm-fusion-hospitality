@@ -46,6 +46,7 @@ data/
 
 # OneDrive report data (large PDFs)
 OneDrive_*/
+OneDrive_*.zip
 *.png
 
 # Dev env files

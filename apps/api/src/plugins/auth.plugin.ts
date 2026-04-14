@@ -17,7 +17,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
   await app.register(cookie);
 
   await app.register(jwt, {
-    secret: env.JWT_SECRET,
+    secret: process.env.JWT_SECRET ?? 'dev-secret-key-placeholder-min-32-chars!!',
     cookie: { cookieName: 'session_token', signed: false },
   });
 
