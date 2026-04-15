@@ -7,6 +7,18 @@ import { db } from '@fusion/db';
 import { ALERT_THRESHOLDS, SEVERITY } from '../config/constants.js';
 import type { DailyMetricsPayload, FinancialMetricsPayload } from '../types/index.js';
 
+interface AlertCandidate {
+  alertType: string;
+  severity: string;
+  title: string;
+  description: string;
+  metricName: string;
+  metricValue?: number;
+  thresholdValue?: number;
+  priorValue?: number;
+  pctChange?: number;
+}
+
 export class AlertEngineService {
   async evaluate(
     reportId: string,
@@ -69,7 +81,7 @@ export class AlertEngineService {
     metrics: Partial<DailyMetricsPayload>,
     property: { id: string; name: string; adrFloor: unknown },
   ) {
-    const alerts = [];
+    const alerts: AlertCandidate[] = [];
 
     // Occupancy YoY drop.
     if (
@@ -159,7 +171,7 @@ export class AlertEngineService {
     financials: Partial<FinancialMetricsPayload>,
     metrics: Partial<DailyMetricsPayload>,
   ) {
-    const alerts = [];
+    const alerts: AlertCandidate[] = [];
 
     // High AR aging (90+ days > 20% of total).
     if (financials.ar90PlusDays != null && financials.arTotal != null && financials.arTotal > 0) {

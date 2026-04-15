@@ -5,7 +5,7 @@
 
 import fp from 'fastify-plugin';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { db } from '@fusion/db';
+import { db, Prisma } from '@fusion/db';
 
 export interface AuditEntry {
   action: string;
@@ -31,8 +31,8 @@ export const auditPlugin = fp(async (app: FastifyInstance) => {
             action: entry.action,
             resourceType: entry.resourceType,
             resourceId: entry.resourceId ?? null,
-            beforeValue: entry.beforeValue ? (entry.beforeValue as object) : null,
-            afterValue: entry.afterValue ? (entry.afterValue as object) : null,
+            beforeValue: entry.beforeValue ? (entry.beforeValue as object) : Prisma.JsonNull,
+            afterValue: entry.afterValue ? (entry.afterValue as object) : Prisma.JsonNull,
             ipAddress: req.ip ?? null,
             userAgent: req.headers['user-agent'] ?? null,
             requestId: req.id,

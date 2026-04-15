@@ -633,7 +633,12 @@ export async function processZipUpload(
         detectedDate,
         overallConfidence,
         isDuplicate: dupCheck.isDuplicate,
-        duplicateOf: dupCheck.isDuplicate ? { reportId: dupCheck.reportId, method: dupCheck.method } : null,
+        duplicateOf: dupCheck.isDuplicate
+          ? {
+              ...(dupCheck.reportId !== undefined && { reportId: dupCheck.reportId }),
+              ...(dupCheck.method !== undefined && { method: dupCheck.method }),
+            }
+          : null,
         status: itemStatus,
       };
 

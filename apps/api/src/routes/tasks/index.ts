@@ -85,14 +85,14 @@ export async function tasksRoutes(app: FastifyInstance) {
         data: {
           orgId: req.authUser.orgId,
           propertyId: body.propertyId,
-          alertId: body.alertId,
+          alertId: body.alertId ?? null,
           title: body.title,
-          description: body.description,
+          description: body.description ?? null,
           taskType: body.taskType,
           priority: body.priority,
-          assignedTo: body.assignedTo,
-          assignedBy: body.assignedTo ? req.authUser.id : undefined,
-          dueDate: body.dueDate ? new Date(body.dueDate) : undefined,
+          assignedTo: body.assignedTo ?? null,
+          ...(body.assignedTo ? { assignedBy: req.authUser.id } : {}),
+          ...(body.dueDate ? { dueDate: new Date(body.dueDate) } : {}),
         },
       });
 
@@ -131,14 +131,19 @@ export async function tasksRoutes(app: FastifyInstance) {
         });
       }
 
+      const { dueDate, ...rest } = body;
+      const data: Record<string, unknown> = Object.fromEntries(
+        Object.entries(rest).filter(([, v]) => v !== undefined),
+      );
+      if (dueDate !== undefined) {
+        data.dueDate = dueDate === null ? null : new Date(dueDate);
+      }
+      if (body.status === 'completed') data.completedAt = new Date();
+      if (body.assignedTo !== undefined) data.assignedBy = req.authUser.id;
+
       const updated = await db.task.update({
         where: { id },
-        data: {
-          ...body,
-          dueDate: body.dueDate ? new Date(body.dueDate) : body.dueDate === null ? null : undefined,
-          ...(body.status === 'completed' && { completedAt: new Date() }),
-          ...(body.assignedTo !== undefined && { assignedBy: req.authUser.id }),
-        },
+        data,
       });
 
       await app.audit(req, {

@@ -28,7 +28,9 @@
       "@prisma/engines",
       "prisma",
       "esbuild",
-      "argon2"
+      "argon2",
+      "sharp",
+      "tesseract.js"
     ]
   },
   "dependencies": {

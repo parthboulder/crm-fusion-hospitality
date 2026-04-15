@@ -254,6 +254,36 @@ model ExtractionJob {
   @@map("extraction_jobs")
 }
 
+// ─── OCR Jobs ──────────────────────────────────────────────────────────────────
+// Standalone OCR pipeline: direct file upload → async processing → extracted JSON.
+// Independent of Report/ReportFile (ad-hoc uploads that aren't tied to a property).
+
+model OcrJob {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String?   @map("org_id") @db.Uuid
+  uploadedBy      String?   @map("uploaded_by") @db.Uuid
+  originalName    String    @map("original_name")
+  storagePath     String    @map("storage_path")
+  fileUrl         String?   @map("file_url")
+  fileType        String    @map("file_type")
+  fileSizeBytes   BigInt    @map("file_size_bytes")
+  checksumSha256  String?   @map("checksum_sha256")
+  status          String    @default("pending")
+  priority        Int       @default(0)
+  retryCount      Int       @default(0) @map("retry_count")
+  extractedData   Json?     @map("extracted_data")
+  errorMessage    String?   @map("error_message")
+  startedAt       DateTime? @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, priority(sort: Desc), createdAt])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([checksumSha256])
+  @@map("ocr_jobs")
+}
+
 // ─── Metrics ───────────────────────────────────────────────────────────────────
 
 model DailyMetrics {

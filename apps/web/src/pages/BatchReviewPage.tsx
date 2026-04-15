@@ -415,7 +415,7 @@ function BatchDetail({
   const isActing = itemMutation.isPending || approveAllMutation.isPending || processMutation.isPending;
 
   const handleItemAction = useCallback((itemId: string, action: string, overrides?: Record<string, string>) => {
-    itemMutation.mutate({ itemId, action, overrides });
+    itemMutation.mutate({ itemId, action, overrides: overrides ?? {} });
   }, [itemMutation]);
 
   return (

@@ -32,8 +32,8 @@ function Sparkline({ values, color }: { values: number[]; color: string }) {
     })
     .join(' ');
 
-  const last = clean[clean.length - 1];
-  const first = clean[0];
+  const last = clean[clean.length - 1] ?? 0;
+  const first = clean[0] ?? 0;
   const trend = last >= first ? color : '#dc2626';
 
   return (

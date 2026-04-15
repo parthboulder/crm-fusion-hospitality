@@ -30,14 +30,16 @@ async function request<T>(
     return mockRequest<T>(method, path, body);
   }
 
+  const headers: Record<string, string> = { ...(options.headers as Record<string, string>) };
+  if (options.body != null && !(options.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     method,
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
     ...options,
+    headers,
   });
 
   const json = await res.json().catch(() => null);

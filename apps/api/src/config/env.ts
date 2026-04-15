@@ -1,8 +1,19 @@
 /**
  * Validated environment config — fails fast at startup if required vars are missing.
+ * Loads .env from repo root (monorepo single-env convention) before validation.
  */
 
+import { config as loadEnv } from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Try repo root first (apps/api/src/config/env.ts → ../../../../.env), then CWD.
+loadEnv({ path: path.resolve(__dirname, '../../../../.env') });
+loadEnv(); // CWD fallback — no-op if already loaded
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -14,7 +25,15 @@ const schema = z.object({
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   STORAGE_BUCKET_REPORTS: z.string().default('reports-private'),
+  STORAGE_BUCKET_OCR: z.string().default('ocr-uploads'),
   SIGNED_URL_EXPIRY_SECONDS: z.coerce.number().default(900),
+
+  OCR_MAX_FILE_SIZE_BYTES: z.coerce.number().default(20 * 1024 * 1024),
+  OCR_WORKER_INTERVAL_MS: z.coerce.number().default(7_000),
+  OCR_WORKER_CONCURRENCY: z.coerce.number().default(2),
+  OCR_WORKER_MAX_RETRIES: z.coerce.number().default(2),
+  OCR_WORKER_ENABLED: z.coerce.boolean().default(true),
+  NVIDIA_API_KEY: z.string().optional(),
 
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default('alerts@fusion-hospitality.com'),

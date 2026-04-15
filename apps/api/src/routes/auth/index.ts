@@ -135,7 +135,7 @@ export async function authRoutes(app: FastifyInstance) {
           userId: user.id,
           tokenHash: '', // will be updated after JWT is signed
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: req.headers['user-agent'] ?? null,
           expiresAt,
         },
       });
@@ -260,7 +260,7 @@ export async function authRoutes(app: FastifyInstance) {
           userId: user.id,
           tokenHash: '',
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: req.headers['user-agent'] ?? null,
           expiresAt,
         },
       });

@@ -110,7 +110,20 @@ export async function propertiesRoutes(app: FastifyInstance) {
       const body = propertyBodySchema.parse(req.body);
 
       const property = await db.property.create({
-        data: { ...body, orgId: req.authUser.orgId },
+        data: {
+          orgId: req.authUser.orgId,
+          name: body.name,
+          country: body.country,
+          timezone: body.timezone,
+          brand: body.brand ?? null,
+          brandCode: body.brandCode ?? null,
+          address: body.address ?? null,
+          city: body.city ?? null,
+          state: body.state ?? null,
+          totalRooms: body.totalRooms ?? null,
+          pmsType: body.pmsType ?? null,
+          adrFloor: body.adrFloor ?? null,
+        },
       });
 
       await app.audit(req, {
@@ -137,6 +150,7 @@ export async function propertiesRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const body = propertyBodySchema.partial().parse(req.body);
+      const data = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
 
       const before = await db.property.findFirst({ where: { id, orgId: req.authUser.orgId } });
       if (!before) {
@@ -146,7 +160,7 @@ export async function propertiesRoutes(app: FastifyInstance) {
         });
       }
 
-      const updated = await db.property.update({ where: { id }, data: body });
+      const updated = await db.property.update({ where: { id }, data });
 
       await app.audit(req, {
         action: 'property.update',

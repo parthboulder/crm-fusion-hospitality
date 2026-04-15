@@ -295,7 +295,7 @@ export async function reportsRoutes(app: FastifyInstance) {
           status: body.action === 'approve' ? REPORT_STATUS.APPROVED : REPORT_STATUS.FAILED,
           reviewedBy: req.authUser.id,
           reviewedAt: new Date(),
-          reviewNotes: body.notes,
+          reviewNotes: body.notes ?? null,
           requiresReview: false,
           ...(body.reportDate && { reportDate: new Date(body.reportDate) }),
           ...(body.reportType && { reportType: body.reportType }),

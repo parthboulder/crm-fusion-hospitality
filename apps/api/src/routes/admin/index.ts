@@ -62,16 +62,18 @@ export async function adminRoutes(app: FastifyInstance) {
         email: body.email.toLowerCase(),
         fullName: body.fullName,
         roleId: body.roleId,
-        userPropertyAccess: body.propertyIds?.length
+        ...(body.propertyIds?.length
           ? {
-              createMany: {
-                data: body.propertyIds.map((propertyId) => ({
-                  propertyId,
-                  grantedBy: req.authUser.id,
-                })),
+              userPropertyAccess: {
+                createMany: {
+                  data: body.propertyIds.map((propertyId) => ({
+                    propertyId,
+                    grantedBy: req.authUser.id,
+                  })),
+                },
               },
             }
-          : undefined,
+          : {}),
       },
     });
 

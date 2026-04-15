@@ -1,0 +1,50 @@
+# ─── Build hygiene: keep the Docker build context small ──────────────────────
+# The Dockerfile uses the repo root as its build context so it can access
+# workspace manifests. This file excludes everything that doesn't need to
+# ship — local scratch data, dev-only trees, and large assets.
+
+# Node / build artifacts
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/coverage
+**/tsconfig.tsbuildinfo
+
+# Env files — NEVER bake secrets into the image; pass via runtime env vars.
+.env
+.env.*
+!.env.example
+
+# VCS / IDE
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# OS / scratch
+.tmp
+tmp
+*.log
+*.tmp
+
+# Web app (built separately / deployed to Netlify)
+apps/web
+
+# Things not needed at runtime
+OCR-V1-
+OneDrive_*
+scripts
+execution
+directives
+instructions
+team-claude-setup
+supabase
+*.md
+!apps/api/Dockerfile
+
+# Dev-only root files
+netlify.toml
+start-api.ps1

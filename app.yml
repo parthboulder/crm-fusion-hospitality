@@ -1,0 +1,30 @@
+# ─── PM2 app config — Fusion Hospitality API ────────────────────────────────
+#
+# Run on the server with:
+#   pm2 start app.yml
+#   pm2 save
+#   pm2 startup   # for boot persistence
+#
+# Secrets (SUPABASE_*, DATABASE_URL, JWT_SECRET, etc.) belong in a .env file
+# alongside dist/server.js — NOT in this file. env.ts loads it automatically.
+
+apps:
+  - name: fusion-api
+    cwd: /home/fusioncrm/apps/api/
+    script: dist/server.js
+    interpreter: /usr/bin/node
+    interpreter_args: --enable-source-maps
+    instances: 1
+    exec_mode: fork
+    autorestart: true
+    max_restarts: 10
+    max_memory_restart: 1G
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z"
+    out_file: /home/fusioncrm/logs/fusion-api.out.log
+    error_file: /home/fusioncrm/logs/fusion-api.err.log
+    merge_logs: true
+    env:
+      NODE_ENV: production
+      API_PORT: 3002
+      API_HOST: 127.0.0.1
+      CORS_ORIGIN: https://site65340-1j6stw.scloudsite101.com

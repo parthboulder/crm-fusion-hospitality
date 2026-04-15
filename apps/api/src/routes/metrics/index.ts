@@ -177,7 +177,7 @@ export async function metricsRoutes(app: FastifyInstance) {
           tableName: body.tableName,
           recordId: body.recordId,
           fieldName: body.fieldName,
-          oldValue,
+          oldValue: oldValue ?? null,
           newValue: body.newValue,
           overrideReason: body.overrideReason,
           requiresApproval,
