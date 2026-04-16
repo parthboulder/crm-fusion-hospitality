@@ -51,3 +51,13 @@ OneDrive_*.zip
 
 # Dev env files
 apps/web/.env.development
+
+# Build zips
+*.zip
+
+# Playwright
+test-results/
+playwright-report/
+
+# Deploy staging
+public_html/
