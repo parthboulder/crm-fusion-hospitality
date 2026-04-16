@@ -5,34 +5,26 @@
 
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { format, subDays } from 'date-fns';
+import { format } from 'date-fns';
 import { ArrowLeftIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline';
 import { fmtCurrency } from '../lib/formatters';
 import { useFlashReportData } from '../hooks/useFlashReportData';
+import { useLatestDataDate } from '../hooks/useLatestDataDate';
 import { FlashReportTable } from '../components/stoneriver/FlashReportTable';
 import { MultiSelect } from '../components/stoneriver/MultiSelect';
 import { CITIES, REGIONS } from '../constants/stoneriver-properties';
 
-const DEFAULT_DATE = format(subDays(new Date(), 1), 'yyyy-MM-dd');
+const TODAY = format(new Date(), 'yyyy-MM-dd');
 
 export function FlashReportDashboardPage() {
-  const [selectedDate, setSelectedDate] = useState(DEFAULT_DATE);
+  const { data: latestDate } = useLatestDataDate('flash_report');
+  const [selectedDate, setSelectedDate] = useState('');
   const [filterCities, setFilterCities] = useState<string[]>([]);
   const [filterRegions, setFilterRegions] = useState<string[]>([]);
 
-  // Auto-detect latest date in mock mode
   useEffect(() => {
-    if (import.meta.env['VITE_MOCK'] !== 'true') return;
-    fetch('/data/output.json')
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (!data?.results) return;
-        const dates = [...new Set(data.results.map((r: { dateFolder?: string }) => r.dateFolder).filter(Boolean))] as string[];
-        dates.sort();
-        if (dates.length > 0) setSelectedDate(dates[dates.length - 1]!);
-      })
-      .catch(() => {});
-  }, []);
+    if (latestDate && !selectedDate) setSelectedDate(latestDate);
+  }, [latestDate, selectedDate]);
 
   const [exporting, setExporting] = useState(false);
   const { data: flashData = [], isLoading } = useFlashReportData(selectedDate);
@@ -101,7 +93,7 @@ export function FlashReportDashboardPage() {
           type="date"
           value={selectedDate}
           onChange={(e) => setSelectedDate(e.target.value)}
-          max={DEFAULT_DATE}
+          max={TODAY}
           className="text-xs border border-[#e5e5e5] px-2 py-1.5 text-[#1a1a1a] bg-white focus:outline-none focus:ring-1 focus:ring-[#1a1a1a] rounded"
         />
 

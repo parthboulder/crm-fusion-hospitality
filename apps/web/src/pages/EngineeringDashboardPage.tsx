@@ -4,14 +4,15 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { format, subDays } from 'date-fns';
+import { format } from 'date-fns';
 import { ArrowLeftIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline';
 import { clsx } from 'clsx';
 import { useEngineeringData } from '../hooks/useEngineeringData';
+import { useLatestDataDate } from '../hooks/useLatestDataDate';
 import { PROPERTIES } from '../constants/stoneriver-properties';
 import type { OOORoom } from '../components/stoneriver/engineering-types';
 
-const DEFAULT_DATE = format(subDays(new Date(), 1), 'yyyy-MM-dd');
+const TODAY = format(new Date(), 'yyyy-MM-dd');
 
 type ViewTab = 'ooo' | 'longterm' | 'summary';
 
@@ -181,22 +182,14 @@ function SummaryView({ oooRooms, longTermRooms }: { oooRooms: OOORoom[]; longTer
 }
 
 export function EngineeringDashboardPage() {
-  const [selectedDate, setSelectedDate] = useState(DEFAULT_DATE);
+  const { data: latestDate } = useLatestDataDate('engineering_ooo_rooms');
+  const [selectedDate, setSelectedDate] = useState('');
   const [viewTab, setViewTab] = useState<ViewTab>('summary');
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
-    if (import.meta.env['VITE_MOCK'] !== 'true') return;
-    fetch('/data/output.json')
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (!data?.results) return;
-        const dates = [...new Set(data.results.map((r: { dateFolder?: string }) => r.dateFolder).filter(Boolean))] as string[];
-        dates.sort();
-        if (dates.length > 0) setSelectedDate(dates[dates.length - 1]!);
-      })
-      .catch(() => {});
-  }, []);
+    if (latestDate && !selectedDate) setSelectedDate(latestDate);
+  }, [latestDate, selectedDate]);
 
   const { data: engData, isLoading } = useEngineeringData(selectedDate);
   const oooRooms = engData?.oooRooms ?? [];
@@ -255,7 +248,7 @@ export function EngineeringDashboardPage() {
           type="date"
           value={selectedDate}
           onChange={(e) => setSelectedDate(e.target.value)}
-          max={DEFAULT_DATE}
+          max={TODAY}
           className="text-xs border border-[#e5e5e5] px-2 py-1.5 text-[#1a1a1a] bg-white focus:outline-none focus:ring-1 focus:ring-[#1a1a1a] rounded"
         />
 

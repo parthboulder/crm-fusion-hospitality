@@ -11,6 +11,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { processFile, extractFinancialData, TesseractWorkerPool } from '../lib/ocr/index.js';
+import { ingestOcrResult } from '../lib/report-parsers.js';
 import { env } from '../config/env.js';
 
 interface WorkerHandle {
@@ -206,6 +207,7 @@ export function startOcrWorker(log: FastifyBaseLogger): WorkerHandle {
           pages: ocrResult.pages,
         },
         financial,
+        fullText: ocrResult.fullText,
         fullTextPreview: ocrResult.fullText.slice(0, 4000),
       };
 
@@ -226,6 +228,17 @@ export function startOcrWorker(log: FastifyBaseLogger): WorkerHandle {
         { jobId: job.id, method: ocrResult.method, ms: ocrResult.processingTimeMs },
         'ocr_worker.job.complete',
       );
+
+      // 5. Post-OCR: parse and ingest into performance tables if applicable.
+      try {
+        await ingestOcrResult(job.id, job.originalName, ocrResult.fullText, log);
+      } catch (ingestErr) {
+        // Non-fatal — OCR succeeded, ingestion is best-effort.
+        log.warn(
+          { jobId: job.id, err: ingestErr instanceof Error ? ingestErr.message : String(ingestErr) },
+          'ocr_worker.ingest.failed',
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error({ jobId: job.id, err: message }, 'ocr_worker.job.error');

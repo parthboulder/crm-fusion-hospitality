@@ -31,6 +31,7 @@ import { webhooksRoutes } from './routes/webhooks/index.js';
 import { batchesRoutes } from './routes/batches/index.js';
 import { scannerRoutes } from './routes/scanner/index.js';
 import { ocrRoutes } from './routes/ocr/index.js';
+import { performanceRoutes } from './routes/performance/index.js';
 
 // Workers
 import { startOcrWorker } from './workers/ocr-worker.js';
@@ -83,6 +84,7 @@ await app.register(webhooksRoutes, { prefix: '/api/v1/webhooks' });
 await app.register(batchesRoutes, { prefix: '/api/v1/batches' });
 await app.register(scannerRoutes, { prefix: '/api/v1/scanner' });
 await app.register(ocrRoutes, { prefix: '/api/v1/ocr' });
+await app.register(performanceRoutes, { prefix: '/api/v1/performance' });
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 

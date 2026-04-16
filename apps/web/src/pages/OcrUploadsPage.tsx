@@ -468,13 +468,17 @@ export function OcrUploadsPage() {
                 Folder
               </button>
             </div>
+            {/* Separate hidden input for folder picking — webkitdirectory
+                makes the browser open a folder-select dialog instead of file-select. */}
             <input
               ref={folderInputRef}
               type="file"
               multiple
               onChange={onFolderPick}
               className="hidden"
-              {...({ webkitdirectory: '', directory: '', mozdirectory: '' } as Record<string, string>)}
+              // @ts-expect-error — webkitdirectory is non-standard but supported in all major browsers
+              webkitdirectory="true"
+              directory="true"
             />
           </div>
 
