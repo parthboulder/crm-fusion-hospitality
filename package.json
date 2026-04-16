@@ -4,17 +4,17 @@
   "private": true,
   "scripts": {
     "dev": "pnpm --filter web dev",
-    "build": "pnpm -r build",
+    "dev:api": "pnpm --filter @fusion/api dev",
+    "build:web": "pnpm --filter web build",
+    "build:api": "pnpm --filter @fusion/api build",
+    "build": "pnpm run build:web && pnpm run build:api",
+    "start": "node apps/api/dist/server.js",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
-    "db:generate": "pnpm --filter @fusion/db generate",
-    "db:migrate": "pnpm --filter @fusion/db migrate:dev",
-    "db:push": "pnpm --filter @fusion/db db:push",
-    "db:studio": "pnpm --filter @fusion/db studio"
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/adm-zip": "^0.5.8",
-    "@types/pdf-parse": "^1.1.5",
     "tsx": "^4.21.0",
     "typescript": "^5.4.5"
   },
@@ -24,9 +24,6 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "@prisma/client",
-      "@prisma/engines",
-      "prisma",
       "esbuild",
       "argon2",
       "sharp",
@@ -34,8 +31,6 @@
     ]
   },
   "dependencies": {
-    "@mistralai/mistralai": "^2.1.2",
-    "adm-zip": "^0.5.17",
-    "pdf-parse": "1.1.1"
+    "adm-zip": "^0.5.17"
   }
 }

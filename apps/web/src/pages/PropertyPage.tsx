@@ -8,7 +8,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api-client';
 import { KpiCard } from '../components/dashboard/KpiCard';
 import { fmtCurrency, fmtPct, fmtDate, yoyChange } from '../lib/formatters';
-import { SparklesIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { SeverityBadge } from '../components/shared/SeverityBadge';
 
 export function PropertyPage() {
@@ -20,13 +20,6 @@ export function PropertyPage() {
     queryKey: ['property', id],
     queryFn: () => api.get<{ data: { property: PropertyDetail; recentMetrics: MetricRow[] } }>(`/properties/${id!}`),
     enabled: !!id,
-  });
-
-  const { data: summaryData, isLoading: summaryLoading } = useQuery({
-    queryKey: ['ai-summary', id],
-    queryFn: () => api.post<{ data: { content: string }; cached: boolean }>(`/ai/property/${id!}/summary`, { period: 'daily' }),
-    enabled: !!id,
-    staleTime: 3_600_000,
   });
 
   const { data: alerts } = useQuery({
@@ -95,23 +88,6 @@ export function PropertyPage() {
         <KpiCard label="ADR"         value={fmtCurrency(latest?.adr)}        change={yoyChange(latest?.adr ?? null, latest?.pyAdr ?? null)} />
         <KpiCard label="RevPAR"      value={fmtCurrency(latest?.revpar)}     change={yoyChange(latest?.revpar ?? null, latest?.pyRevpar ?? null)} />
         <KpiCard label="Revenue"     value={fmtCurrency(latest?.totalRevenue)} change={revChange} />
-      </div>
-
-      {/* AI Summary */}
-      <div className="card p-4 mb-6">
-        <div className="flex items-center gap-2 mb-2">
-          <SparklesIcon className="w-4 h-4 text-brand-500" />
-          <span className="text-xs font-semibold text-brand-700">AI Summary</span>
-          {summaryData?.cached && <span className="text-xs text-gray-300">cached</span>}
-        </div>
-        {summaryLoading ? (
-          <div className="space-y-2">
-            <div className="h-3 bg-gray-100 rounded animate-pulse w-full" />
-            <div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" />
-          </div>
-        ) : (
-          <p className="text-sm text-gray-600 leading-relaxed">{summaryData?.data.content ?? 'No summary available.'}</p>
-        )}
       </div>
 
       {/* Tabs */}

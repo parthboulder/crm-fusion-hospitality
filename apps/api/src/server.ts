@@ -5,6 +5,10 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { env } from './config/env.js';
 
 // Plugins
@@ -22,7 +26,6 @@ import { reportsRoutes } from './routes/reports/index.js';
 import { metricsRoutes } from './routes/metrics/index.js';
 import { alertsRoutes } from './routes/alerts/index.js';
 import { tasksRoutes } from './routes/tasks/index.js';
-import { aiRoutes } from './routes/ai/index.js';
 import { adminRoutes } from './routes/admin/index.js';
 import { webhooksRoutes } from './routes/webhooks/index.js';
 import { batchesRoutes } from './routes/batches/index.js';
@@ -41,7 +44,9 @@ const app = Fastify({
     }),
   },
   genReqId: () => crypto.randomUUID(),
-  trustProxy: true,
+  // Trust only the first proxy hop (e.g., Nginx, Cloudflare, or load balancer).
+  // Using `true` trusts ALL proxies, allowing IP spoofing via X-Forwarded-For.
+  trustProxy: 1,
 });
 
 // ─── Core Plugins ─────────────────────────────────────────────────────────────
@@ -53,7 +58,9 @@ await app.register(cors, {
 });
 
 await app.register(multipart, {
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB (supports ZIP batch uploads)
+  // 50 MB default — individual routes (e.g., ZIP batch upload) can override.
+  // This prevents a single request from buffering hundreds of MB into memory.
+  limits: { fileSize: 50 * 1024 * 1024 },
 });
 
 await app.register(securityHeadersPlugin);
@@ -71,7 +78,6 @@ await app.register(reportsRoutes, { prefix: '/api/v1/reports' });
 await app.register(metricsRoutes, { prefix: '/api/v1/metrics' });
 await app.register(alertsRoutes, { prefix: '/api/v1/alerts' });
 await app.register(tasksRoutes, { prefix: '/api/v1/tasks' });
-await app.register(aiRoutes, { prefix: '/api/v1/ai' });
 await app.register(adminRoutes, { prefix: '/api/v1/admin' });
 await app.register(webhooksRoutes, { prefix: '/api/v1/webhooks' });
 await app.register(batchesRoutes, { prefix: '/api/v1/batches' });
@@ -84,6 +90,29 @@ app.get('/health', { logLevel: 'silent' }, async () => ({
   status: 'ok',
   ts: new Date().toISOString(),
 }));
+
+// ─── Static File Serving (production) ────────────────────────────────────────
+// In production the same Node process serves the built React SPA alongside
+// the API routes. In dev, Vite handles the frontend on its own port.
+
+const serveStatic = env.NODE_ENV === 'production' || process.env['SERVE_STATIC'] === 'true';
+if (serveStatic) {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const staticRoot = env.STATIC_DIR || path.resolve(__dirname, '..', '..', 'web', 'dist');
+
+  if (existsSync(staticRoot)) {
+    await app.register(fastifyStatic, {
+      root: staticRoot,
+      prefix: '/',
+      wildcard: false,
+      decorateReply: true,
+    });
+
+    app.log.info({ staticRoot }, 'static_files.serving');
+  } else {
+    app.log.warn({ staticRoot }, 'static_files.dir_missing — SPA not served');
+  }
+}
 
 // ─── Process-level crash guards ──────────────────────────────────────────────
 // Node 15+ crashes the process on unhandled promise rejections. The OCR

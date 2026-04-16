@@ -10,7 +10,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { processFile, extractFinancialData, TesseractWorkerPool } from '@fusion/ocr';
+import { processFile, extractFinancialData, TesseractWorkerPool } from '../lib/ocr/index.js';
 import { env } from '../config/env.js';
 
 interface WorkerHandle {

@@ -5,15 +5,8 @@
 
 import type { FastifyInstance } from 'fastify';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { createClient } from '@supabase/supabase-js';
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../../lib/supabase.js';
 import { env } from '../../config/env.js';
-
-function getAdminSupabase() {
-  return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
 
 function verifyHmacSignature(
   payload: string,
@@ -64,7 +57,7 @@ export async function webhooksRoutes(app: FastifyInstance) {
     app.log.info({ accounts }, 'dropbox_webhook_received');
 
     // Fan out — one Edge Function call per changed Dropbox account.
-    const supabase = getAdminSupabase();
+    const supabase = supabaseAdmin();
     await Promise.allSettled(
       accounts.map((accountId) =>
         supabase.functions.invoke('sync-dropbox', { body: { accountId } }),
@@ -101,7 +94,7 @@ export async function webhooksRoutes(app: FastifyInstance) {
 
     app.log.info({ count: payload.value?.length }, 'onedrive_webhook_received');
 
-    const supabase = getAdminSupabase();
+    const supabase = supabaseAdmin();
     await Promise.allSettled(
       (payload.value ?? []).map((item) =>
         supabase.functions.invoke('sync-onedrive', {

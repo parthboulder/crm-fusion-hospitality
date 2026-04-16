@@ -7,9 +7,8 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import AdmZip from 'adm-zip';
 import { createClient } from '@supabase/supabase-js';
-import { db } from '@fusion/db';
 import { env } from '../config/env.js';
 import { REPORT_STATUS } from '../config/constants.js';
 
@@ -182,10 +181,14 @@ async function matchPropertyFromInput(
   if (!normalized || normalized === '_root') return null;
 
   // Load org properties from DB.
-  const properties = await db.property.findMany({
-    where: { orgId, isActive: true },
-    select: { id: true, name: true, brand: true, brandCode: true, city: true },
-  });
+  const supabase = getAdminSupabase();
+  const { data: properties, error: propError } = await supabase
+    .from('properties')
+    .select('id, name, brand, brand_code, city')
+    .eq('org_id', orgId)
+    .eq('is_active', true);
+
+  if (propError || !properties) return null;
 
   let bestMatch: { propertyId: string; propertyName: string; score: number } | null = null;
 
@@ -327,26 +330,15 @@ function matchReportType(
 
 /**
  * Extract files from a ZIP archive into a temporary directory.
+ * Uses adm-zip (pure JS) to avoid shell injection risks from execSync.
  */
 function extractZip(zipBuffer: Buffer): { extractPath: string; cleanup: () => void } {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fusion-zip-'));
-  const zipPath = path.join(tmpDir, 'upload.zip');
   const extractPath = path.join(tmpDir, 'extracted');
-
-  fs.writeFileSync(zipPath, zipBuffer);
   fs.mkdirSync(extractPath, { recursive: true });
 
-  if (process.platform === 'win32') {
-    execSync(
-      `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractPath}' -Force"`,
-      { stdio: 'pipe', timeout: 120_000 },
-    );
-  } else {
-    execSync(`unzip -o "${zipPath}" -d "${extractPath}"`, {
-      stdio: 'pipe',
-      timeout: 120_000,
-    });
-  }
+  const zip = new AdmZip(zipBuffer);
+  zip.extractAllTo(extractPath, true);
 
   return {
     extractPath,
@@ -489,29 +481,35 @@ async function checkDuplicates(
   propertyId: string | undefined,
   orgId: string,
 ): Promise<{ isDuplicate: boolean; reportId?: string; method?: string }> {
-  // Check by checksum first (most reliable).
-  const checksumMatch = await db.reportFile.findFirst({
-    where: { checksumSha256: file.checksum },
-    select: { reportId: true },
-  });
+  const supabase = getAdminSupabase();
 
-  if (checksumMatch) {
-    return { isDuplicate: true, reportId: checksumMatch.reportId, method: 'checksum' };
+  // Check by checksum first (most reliable).
+  const { data: checksumMatch, error: checksumError } = await supabase
+    .from('report_files')
+    .select('report_id')
+    .eq('checksum_sha256', file.checksum)
+    .limit(1)
+    .maybeSingle();
+
+  if (!checksumError && checksumMatch) {
+    return { isDuplicate: true, reportId: checksumMatch.report_id, method: 'checksum' };
   }
 
   // Check by filename + size within the same property.
   if (propertyId) {
-    const filenameMatch = await db.reportFile.findFirst({
-      where: {
-        originalName: file.filename,
-        fileSizeBytes: BigInt(file.fileSizeBytes),
-        report: { propertyId, orgId },
-      },
-      select: { reportId: true },
-    });
+    // Join through reports to filter by property and org.
+    const { data: filenameMatch, error: fnError } = await supabase
+      .from('report_files')
+      .select('report_id, reports!inner(property_id, org_id)')
+      .eq('original_name', file.filename)
+      .eq('file_size_bytes', file.fileSizeBytes)
+      .eq('reports.property_id', propertyId)
+      .eq('reports.org_id', orgId)
+      .limit(1)
+      .maybeSingle();
 
-    if (filenameMatch) {
-      return { isDuplicate: true, reportId: filenameMatch.reportId, method: 'filename_size' };
+    if (!fnError && filenameMatch) {
+      return { isDuplicate: true, reportId: filenameMatch.report_id, method: 'filename_size' };
     }
   }
 
@@ -772,25 +770,26 @@ export async function processApprovedItems(
         continue;
       }
 
-      // Read the file from the temporary extraction or from storage.
-      // Since the ZIP may have been cleaned up, we read from original batch storage.
-      // For now, we work with what we have — the file buffer approach.
-      // In production, files would be stored to temp storage during extraction.
-
       // Create Report record.
-      const report = await db.report.create({
-        data: {
-          orgId,
-          propertyId: item.detected_property_id,
-          reportType: item.report_type_slug ?? 'pending_detection',
-          reportDate: item.detected_date ? new Date(item.detected_date) : new Date(),
+      const { data: report, error: reportError } = await supabase
+        .from('reports')
+        .insert({
+          org_id: orgId,
+          property_id: item.detected_property_id,
+          report_type: item.report_type_slug ?? 'pending_detection',
+          report_date: item.detected_date ? new Date(item.detected_date).toISOString() : new Date().toISOString(),
           source: 'zip_upload',
           status: REPORT_STATUS.PENDING,
-          confidenceScore: item.overall_confidence,
-          requiresReview: (item.overall_confidence ?? 0) < CONFIDENCE_THRESHOLD,
-          uploadedBy: item.uploaded_by ?? undefined,
-        },
-      });
+          confidence_score: item.overall_confidence,
+          requires_review: (item.overall_confidence ?? 0) < CONFIDENCE_THRESHOLD,
+          uploaded_by: item.uploaded_by ?? undefined,
+        })
+        .select()
+        .single();
+
+      if (reportError || !report) {
+        throw new Error(`Failed to create report: ${reportError?.message}`);
+      }
 
       // Update batch item with created report.
       await supabase.from('zip_batch_items').update({

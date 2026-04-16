@@ -65,8 +65,19 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance) => {
     });
   });
 
-  // 404 handler.
-  app.setNotFoundHandler((_req, reply) => {
+  // 404 handler — serves index.html for SPA routes in production,
+  // returns JSON 404 for API routes.
+  app.setNotFoundHandler((req, reply) => {
+    if (req.url.startsWith('/api/')) {
+      return reply.code(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Route not found.' },
+      });
+    }
+    // In production with static serving, fall through to the SPA.
+    if (typeof (reply as any).sendFile === 'function') {
+      return (reply as any).sendFile('index.html');
+    }
     return reply.code(404).send({
       success: false,
       error: { code: 'NOT_FOUND', message: 'Route not found.' },

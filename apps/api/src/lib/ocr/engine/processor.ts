@@ -108,7 +108,7 @@ export class OcrProcessor {
           totalConfidence: 0,
           processingTimeMs: 0,
           method: 'ocr',
-          error: job.error,
+          error: job.error ?? '',
         });
       }
     }
@@ -252,7 +252,7 @@ export class OcrProcessor {
     const ocrResults = await this.pool.recognizeBatch(preprocessed);
 
     return ocrResults.map((ocr, i) => ({
-      pageNumber: pdfPages[i].pageNumber,
+      pageNumber: pdfPages[i]!.pageNumber,
       text: postprocessText(ocr.text),
       confidence: ocr.confidence,
     }));

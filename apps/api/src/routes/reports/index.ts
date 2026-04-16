@@ -5,8 +5,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
-import { createClient } from '@supabase/supabase-js';
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../../lib/supabase.js';
 import { env } from '../../config/env.js';
 import { PERMISSIONS, REPORT_STATUS } from '../../config/constants.js';
 
@@ -18,12 +17,6 @@ const ALLOWED_MIME_TYPES = [
 ];
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
-
-function getAdminSupabase() {
-  return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
 
 export async function reportsRoutes(app: FastifyInstance) {
   const auth = [app.verifyAuth];
@@ -69,10 +62,19 @@ export async function reportsRoutes(app: FastifyInstance) {
 
       const { propertyId } = z.object({ propertyId: z.string().uuid() }).parse(req.query);
 
+      const supabase = supabaseAdmin();
+
       // Verify property access.
-      const property = await db.property.findFirst({
-        where: { id: propertyId, orgId: req.authUser.orgId },
-      });
+      const { data: property, error: propError } = await supabase
+        .from('properties')
+        .select('*')
+        .eq('id', propertyId)
+        .eq('org_id', req.authUser.orgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (propError) throw propError;
+
       if (!property) {
         return reply.code(404).send({
           success: false,
@@ -85,7 +87,6 @@ export async function reportsRoutes(app: FastifyInstance) {
       const storagePath = `${req.authUser.orgId}/${propertyId}/${Date.now()}-${checksum.slice(0, 8)}.${ext}`;
 
       // Upload to private Supabase Storage bucket.
-      const supabase = getAdminSupabase();
       const { error: uploadError } = await supabase.storage
         .from(env.STORAGE_BUCKET_REPORTS)
         .upload(storagePath, buffer, {
@@ -101,29 +102,39 @@ export async function reportsRoutes(app: FastifyInstance) {
         });
       }
 
-      // Create report + file records.
-      const report = await db.report.create({
-        data: {
-          orgId: req.authUser.orgId,
-          propertyId,
-          reportType: 'pending_detection', // AI will classify
-          reportDate: new Date(),
+      // Create report record.
+      const { data: report, error: reportError } = await supabase
+        .from('reports')
+        .insert({
+          org_id: req.authUser.orgId,
+          property_id: propertyId,
+          report_type: 'pending_detection',
+          report_date: new Date().toISOString(),
           source: 'manual_upload',
           status: REPORT_STATUS.PENDING,
-          uploadedBy: req.authUser.id,
-          files: {
-            create: {
-              storagePath,
-              originalName: data.filename,
-              mimeType: data.mimetype,
-              fileSizeBytes: BigInt(buffer.byteLength),
-              checksumSha256: checksum,
-              uploadedBy: req.authUser.id,
-            },
-          },
-        },
-        include: { files: true },
-      });
+          uploaded_by: req.authUser.id,
+        })
+        .select()
+        .single();
+
+      if (reportError) throw reportError;
+
+      // Create report file record.
+      const { data: reportFile, error: fileError } = await supabase
+        .from('report_files')
+        .insert({
+          report_id: report.id,
+          storage_path: storagePath,
+          original_name: data.filename,
+          mime_type: data.mimetype,
+          file_size_bytes: buffer.byteLength,
+          checksum_sha256: checksum,
+          uploaded_by: req.authUser.id,
+        })
+        .select()
+        .single();
+
+      if (fileError) throw fileError;
 
       await app.audit(req, {
         action: 'report.upload',
@@ -134,7 +145,7 @@ export async function reportsRoutes(app: FastifyInstance) {
 
       // Trigger async extraction via Supabase Edge Function.
       await supabase.functions.invoke('ingest-file', {
-        body: { reportId: report.id, fileId: report.files[0]!.id },
+        body: { reportId: report.id, fileId: reportFile.id },
       });
 
       return reply.code(201).send({ success: true, data: { reportId: report.id } });
@@ -155,35 +166,56 @@ export async function reportsRoutes(app: FastifyInstance) {
 
     const { authUser } = req;
     const skip = (query.page - 1) * query.limit;
+    const supabase = supabaseAdmin();
 
-    const where = {
-      orgId: authUser.orgId,
-      ...(query.propertyId && { propertyId: query.propertyId }),
-      ...(query.reportType && { reportType: query.reportType }),
-      ...(query.status && { status: query.status }),
-      ...(authUser.propertyIds.length > 0 && {
-        propertyId: { in: authUser.propertyIds },
-      }),
-    };
+    let countQuery = supabase
+      .from('reports')
+      .select('*', { count: 'exact', head: true })
+      .eq('org_id', authUser.orgId);
 
-    const [total, reports] = await Promise.all([
-      db.report.count({ where }),
-      db.report.findMany({
-        where,
-        skip,
-        take: query.limit,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          property: { select: { name: true, brand: true } },
-          files: { where: { isCurrent: true }, select: { originalName: true, mimeType: true } },
-          _count: { select: { alerts: true } },
-        },
-      }),
-    ]);
+    let listQuery = supabase
+      .from('reports')
+      .select(`
+        *,
+        property:properties!property_id ( name, brand ),
+        files:report_files ( original_name, mime_type )
+      `)
+      .eq('org_id', authUser.orgId);
+
+    if (query.propertyId) {
+      countQuery = countQuery.eq('property_id', query.propertyId);
+      listQuery = listQuery.eq('property_id', query.propertyId);
+    }
+    if (query.reportType) {
+      countQuery = countQuery.eq('report_type', query.reportType);
+      listQuery = listQuery.eq('report_type', query.reportType);
+    }
+    if (query.status) {
+      countQuery = countQuery.eq('status', query.status);
+      listQuery = listQuery.eq('status', query.status);
+    }
+    if (authUser.propertyIds.length > 0) {
+      countQuery = countQuery.in('property_id', authUser.propertyIds);
+      listQuery = listQuery.in('property_id', authUser.propertyIds);
+    }
+
+    // Filter files to current only.
+    listQuery = listQuery.eq('files.is_current', true);
+
+    listQuery = listQuery
+      .order('created_at', { ascending: false })
+      .range(skip, skip + query.limit - 1);
+
+    const [countResult, listResult] = await Promise.all([countQuery, listQuery]);
+
+    if (countResult.error) throw countResult.error;
+    if (listResult.error) throw listResult.error;
+
+    const total = countResult.count ?? 0;
 
     return reply.send({
       success: true,
-      data: reports,
+      data: listResult.data,
       total,
       page: query.page,
       limit: query.limit,
@@ -202,11 +234,21 @@ export async function reportsRoutes(app: FastifyInstance) {
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
+      const supabase = supabaseAdmin();
 
-      const report = await db.report.findFirst({
-        where: { id, orgId: req.authUser.orgId },
-        include: { files: { where: { isCurrent: true } } },
-      });
+      const { data: report, error: findError } = await supabase
+        .from('reports')
+        .select(`
+          *,
+          files:report_files ( * )
+        `)
+        .eq('id', id)
+        .eq('org_id', req.authUser.orgId)
+        .eq('files.is_current', true)
+        .limit(1)
+        .maybeSingle();
+
+      if (findError) throw findError;
 
       if (!report) {
         return reply.code(404).send({
@@ -217,7 +259,7 @@ export async function reportsRoutes(app: FastifyInstance) {
 
       if (
         req.authUser.propertyIds.length > 0 &&
-        !req.authUser.propertyIds.includes(report.propertyId)
+        !req.authUser.propertyIds.includes(report.property_id)
       ) {
         return reply.code(403).send({
           success: false,
@@ -225,7 +267,7 @@ export async function reportsRoutes(app: FastifyInstance) {
         });
       }
 
-      const file = report.files[0];
+      const file = report.files?.[0];
       if (!file) {
         return reply.code(404).send({
           success: false,
@@ -233,10 +275,9 @@ export async function reportsRoutes(app: FastifyInstance) {
         });
       }
 
-      const supabase = getAdminSupabase();
       const { data: signedData, error } = await supabase.storage
         .from(env.STORAGE_BUCKET_REPORTS)
-        .createSignedUrl(file.storagePath, env.SIGNED_URL_EXPIRY_SECONDS);
+        .createSignedUrl(file.storage_path, env.SIGNED_URL_EXPIRY_SECONDS);
 
       if (error || !signedData) {
         return reply.code(500).send({
@@ -278,9 +319,17 @@ export async function reportsRoutes(app: FastifyInstance) {
         })
         .parse(req.body);
 
-      const report = await db.report.findFirst({
-        where: { id, orgId: req.authUser.orgId },
-      });
+      const supabase = supabaseAdmin();
+
+      const { data: report, error: findError } = await supabase
+        .from('reports')
+        .select('*')
+        .eq('id', id)
+        .eq('org_id', req.authUser.orgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (findError) throw findError;
 
       if (!report) {
         return reply.code(404).send({
@@ -289,18 +338,22 @@ export async function reportsRoutes(app: FastifyInstance) {
         });
       }
 
-      const updated = await db.report.update({
-        where: { id },
-        data: {
+      const { data: updated, error: updateError } = await supabase
+        .from('reports')
+        .update({
           status: body.action === 'approve' ? REPORT_STATUS.APPROVED : REPORT_STATUS.FAILED,
-          reviewedBy: req.authUser.id,
-          reviewedAt: new Date(),
-          reviewNotes: body.notes ?? null,
-          requiresReview: false,
-          ...(body.reportDate && { reportDate: new Date(body.reportDate) }),
-          ...(body.reportType && { reportType: body.reportType }),
-        },
-      });
+          reviewed_by: req.authUser.id,
+          reviewed_at: new Date().toISOString(),
+          review_notes: body.notes ?? null,
+          requires_review: false,
+          ...(body.reportDate && { report_date: new Date(body.reportDate).toISOString() }),
+          ...(body.reportType && { report_type: body.reportType }),
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
 
       await app.audit(req, {
         action: `report.review.${body.action}`,
@@ -332,51 +385,84 @@ export async function reportsRoutes(app: FastifyInstance) {
 
     const { authUser } = req;
     const skip = (query.page - 1) * query.limit;
+    const supabase = supabaseAdmin();
 
-    const where = {
-      orgId: authUser.orgId,
-      ...(query.propertyId && { propertyId: query.propertyId }),
-      ...(query.reportType && { reportType: query.reportType }),
-      ...(query.status     && { status: query.status }),
-      ...((query.dateFrom || query.dateTo) && {
-        reportDate: {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo   && { lte: new Date(query.dateTo) }),
-        },
-      }),
-      ...(query.q && {
-        files: { some: { originalName: { contains: query.q, mode: 'insensitive' as const } } },
-      }),
-      ...(authUser.propertyIds.length > 0 && { propertyId: { in: authUser.propertyIds } }),
-    };
+    let countQuery = supabase
+      .from('reports')
+      .select('*', { count: 'exact', head: true })
+      .eq('org_id', authUser.orgId);
 
-    const [total, reports] = await Promise.all([
-      db.report.count({ where }),
-      db.report.findMany({
-        where,
-        skip,
-        take: query.limit,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          property: { select: { name: true, brand: true } },
-          files: {
-            where: { isCurrent: true },
-            select: { originalName: true, mimeType: true, fileSizeBytes: true },
-          },
-          _count: { select: { alerts: true } },
-        },
-      }),
-    ]);
+    let listQuery = supabase
+      .from('reports')
+      .select(`
+        *,
+        property:properties!property_id ( name, brand ),
+        files:report_files ( original_name, mime_type, file_size_bytes )
+      `)
+      .eq('org_id', authUser.orgId);
 
-    // Serialize BigInt fileSizeBytes to Number for JSON transport.
-    const serialized = reports.map((r) => ({
-      ...r,
-      files: r.files.map((f) => ({ ...f, fileSizeBytes: Number(f.fileSizeBytes) })),
-    }));
+    if (query.propertyId) {
+      countQuery = countQuery.eq('property_id', query.propertyId);
+      listQuery = listQuery.eq('property_id', query.propertyId);
+    }
+    if (query.reportType) {
+      countQuery = countQuery.eq('report_type', query.reportType);
+      listQuery = listQuery.eq('report_type', query.reportType);
+    }
+    if (query.status) {
+      countQuery = countQuery.eq('status', query.status);
+      listQuery = listQuery.eq('status', query.status);
+    }
+    if (query.dateFrom) {
+      countQuery = countQuery.gte('report_date', new Date(query.dateFrom).toISOString());
+      listQuery = listQuery.gte('report_date', new Date(query.dateFrom).toISOString());
+    }
+    if (query.dateTo) {
+      countQuery = countQuery.lte('report_date', new Date(query.dateTo).toISOString());
+      listQuery = listQuery.lte('report_date', new Date(query.dateTo).toISOString());
+    }
+    if (authUser.propertyIds.length > 0) {
+      countQuery = countQuery.in('property_id', authUser.propertyIds);
+      listQuery = listQuery.in('property_id', authUser.propertyIds);
+    }
+
+    // Filter files to current only.
+    listQuery = listQuery.eq('files.is_current', true);
+
+    // Text search on file original_name via ilike.
+    // The count query uses an inner join to report_files so the filter works.
+    if (query.q) {
+      // Escape LIKE metacharacters to prevent wildcard injection.
+      const escapedQ = query.q.replace(/[%_\\]/g, '\\$&');
+
+      countQuery = supabase
+        .from('reports')
+        .select('*, report_files!inner(original_name)', { count: 'exact', head: true })
+        .eq('org_id', authUser.orgId);
+      if (query.propertyId) countQuery = countQuery.eq('property_id', query.propertyId);
+      if (query.reportType) countQuery = countQuery.eq('report_type', query.reportType);
+      if (query.status) countQuery = countQuery.eq('status', query.status);
+      if (query.dateFrom) countQuery = countQuery.gte('report_date', new Date(query.dateFrom).toISOString());
+      if (query.dateTo) countQuery = countQuery.lte('report_date', new Date(query.dateTo).toISOString());
+      if (authUser.propertyIds.length > 0) countQuery = countQuery.in('property_id', authUser.propertyIds);
+      countQuery = countQuery.ilike('report_files.original_name', `%${escapedQ}%`);
+      listQuery = listQuery.ilike('files.original_name', `%${escapedQ}%`);
+    }
+
+    listQuery = listQuery
+      .order('created_at', { ascending: false })
+      .range(skip, skip + query.limit - 1);
+
+    const [countResult, listResult] = await Promise.all([countQuery, listQuery]);
+
+    if (countResult.error) throw countResult.error;
+    if (listResult.error) throw listResult.error;
+
+    const total = countResult.count ?? 0;
 
     return reply.send({
       success: true,
-      data: serialized,
+      data: listResult.data,
       total,
       page: query.page,
       limit: query.limit,
@@ -387,20 +473,24 @@ export async function reportsRoutes(app: FastifyInstance) {
   // ─── GET /:id — single report with full extracted data ────────────────────
   app.get('/:id', { preHandler: auth }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const supabase = supabaseAdmin();
 
-    const report = await db.report.findFirst({
-      where: { id, orgId: req.authUser.orgId },
-      include: {
-        property:          { select: { name: true, brand: true } },
-        files:             { where: { isCurrent: true } },
-        extractionJobs:    { orderBy: { createdAt: 'desc' }, take: 1 },
-        dailyMetrics:      { orderBy: { metricDate: 'desc' }, take: 1 },
-        financialMetrics:  { orderBy: { metricDate: 'desc' }, take: 1 },
-        uploader:          { select: { fullName: true } },
-        reviewer:          { select: { fullName: true } },
-        _count:            { select: { alerts: true } },
-      },
-    });
+    const { data: report, error } = await supabase
+      .from('reports')
+      .select(`
+        *,
+        property:properties!property_id ( name, brand ),
+        files:report_files ( * ),
+        uploader:user_profiles!uploaded_by ( full_name ),
+        reviewer:user_profiles!reviewed_by ( full_name )
+      `)
+      .eq('id', id)
+      .eq('org_id', req.authUser.orgId)
+      .eq('files.is_current', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
 
     if (!report) {
       return reply.code(404).send({
@@ -411,7 +501,7 @@ export async function reportsRoutes(app: FastifyInstance) {
 
     if (
       req.authUser.propertyIds.length > 0 &&
-      !req.authUser.propertyIds.includes(report.propertyId)
+      !req.authUser.propertyIds.includes(report.property_id)
     ) {
       return reply.code(403).send({
         success: false,
@@ -419,10 +509,33 @@ export async function reportsRoutes(app: FastifyInstance) {
       });
     }
 
-    // Serialize BigInt fileSizeBytes on file records.
+    // Fetch related metrics and extraction jobs separately.
+    const [dailyResult, financialResult, extractionResult] = await Promise.all([
+      supabase
+        .from('daily_metrics')
+        .select('*')
+        .eq('report_id', id)
+        .order('metric_date', { ascending: false })
+        .limit(1),
+      supabase
+        .from('financial_metrics')
+        .select('*')
+        .eq('report_id', id)
+        .order('metric_date', { ascending: false })
+        .limit(1),
+      supabase
+        .from('extraction_jobs')
+        .select('*')
+        .eq('report_id', id)
+        .order('created_at', { ascending: false })
+        .limit(1),
+    ]);
+
     const data = {
       ...report,
-      files: report.files.map((f) => ({ ...f, fileSizeBytes: Number(f.fileSizeBytes) })),
+      dailyMetrics: dailyResult.data ?? [],
+      financialMetrics: financialResult.data ?? [],
+      extractionJobs: extractionResult.data ?? [],
     };
 
     return reply.send({ success: true, data });
@@ -443,9 +556,17 @@ export async function reportsRoutes(app: FastifyInstance) {
         .object({ reportType: z.string().min(1), reportDate: z.string().optional() })
         .parse(req.body);
 
-      const report = await db.report.findFirst({
-        where: { id, orgId: req.authUser.orgId },
-      });
+      const supabase = supabaseAdmin();
+
+      const { data: report, error: findError } = await supabase
+        .from('reports')
+        .select('*')
+        .eq('id', id)
+        .eq('org_id', req.authUser.orgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (findError) throw findError;
 
       if (!report) {
         return reply.code(404).send({
@@ -454,20 +575,24 @@ export async function reportsRoutes(app: FastifyInstance) {
         });
       }
 
-      const updated = await db.report.update({
-        where: { id },
-        data: {
-          reportType: body.reportType,
-          ...(body.reportDate && { reportDate: new Date(body.reportDate) }),
-          requiresReview: false,
-        },
-      });
+      const { data: updated, error: updateError } = await supabase
+        .from('reports')
+        .update({
+          report_type: body.reportType,
+          ...(body.reportDate && { report_date: new Date(body.reportDate).toISOString() }),
+          requires_review: false,
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
 
       await app.audit(req, {
         action: 'report.reclassify',
         resourceType: 'report',
         resourceId: id,
-        beforeValue: { reportType: report.reportType },
+        beforeValue: { reportType: report.report_type },
         afterValue: { reportType: body.reportType },
       });
 

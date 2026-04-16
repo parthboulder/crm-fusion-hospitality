@@ -12,12 +12,20 @@ export const securityHeadersPlugin = fp(async (app: FastifyInstance) => {
       directives: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
+        // Tailwind injects <style> tags at build time. In production the styles
+        // are in an external CSS file, so 'unsafe-inline' is only needed for
+        // dev hot-reload. Use 'unsafe-inline' only in development.
+        styleSrc:
+          process.env.NODE_ENV === 'production'
+            ? ["'self'", 'https://rsms.me']
+            : ["'self'", "'unsafe-inline'", 'https://rsms.me'],
         imgSrc: ["'self'", 'data:', 'blob:'],
-        connectSrc: ["'self'"],
-        fontSrc: ["'self'"],
+        connectSrc: ["'self'", process.env['SUPABASE_URL'] ?? 'https://*.supabase.co'],
+        fontSrc: ["'self'", 'https://rsms.me'],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
       },
     },
     crossOriginEmbedderPolicy: false, // relaxed for file previews

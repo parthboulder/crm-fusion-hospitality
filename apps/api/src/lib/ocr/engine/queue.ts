@@ -61,7 +61,7 @@ export class JobQueue<T, R> {
     const batches = this.createBatches(items, this.options.batchSize);
 
     for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-      const batch = batches[batchIdx];
+      const batch = batches[batchIdx]!;
       console.log(
         `[Queue] Processing batch ${batchIdx + 1}/${batches.length} (${batch.length} items)`
       );
@@ -102,7 +102,7 @@ export class JobQueue<T, R> {
           this.activeCount < this.options.concurrency &&
           jobIndex < jobs.length
         ) {
-          const job = jobs[jobIndex++];
+          const job = jobs[jobIndex++]!;
           this.activeCount++;
           this.executeJob(job).then((result) => {
             this.activeCount--;

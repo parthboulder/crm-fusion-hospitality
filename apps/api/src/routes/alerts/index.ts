@@ -4,7 +4,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../../lib/supabase.js';
 import { PERMISSIONS } from '../../config/constants.js';
 
 export async function alertsRoutes(app: FastifyInstance) {
@@ -25,39 +25,65 @@ export async function alertsRoutes(app: FastifyInstance) {
 
     const { authUser } = req;
     const skip = (query.page - 1) * query.limit;
+    const supabase = supabaseAdmin();
 
-    const where = {
-      orgId: authUser.orgId,
-      ...(query.propertyId && { propertyId: query.propertyId }),
-      ...(query.severity && { severity: query.severity }),
-      ...(query.status ? { status: query.status } : { status: 'open' }),
-      ...(query.alertType && { alertType: query.alertType }),
-      ...(authUser.propertyIds.length > 0 && {
-        propertyId: { in: authUser.propertyIds },
-      }),
-    };
+    // Build base query filters.
+    let countQuery = supabase
+      .from('alerts')
+      .select('*', { count: 'exact', head: true })
+      .eq('org_id', authUser.orgId);
 
-    const [total, alerts] = await Promise.all([
-      db.alert.count({ where }),
-      db.alert.findMany({
-        where,
-        skip,
-        take: query.limit,
-        orderBy: [{ severity: 'asc' }, { createdAt: 'desc' }],
-        include: {
-          property: { select: { name: true, brand: true } },
-          report: { select: { reportType: true, reportDate: true } },
-          tasks: {
-            where: { status: { in: ['open', 'in_progress'] } },
-            select: { id: true, status: true, assignedTo: true },
-          },
-        },
-      }),
-    ]);
+    let listQuery = supabase
+      .from('alerts')
+      .select(`
+        *,
+        property:properties!property_id ( name, brand ),
+        report:reports!report_id ( report_type, report_date ),
+        tasks ( id, status, assigned_to )
+      `)
+      .eq('org_id', authUser.orgId);
+
+    // Apply optional filters to both queries.
+    if (query.propertyId) {
+      countQuery = countQuery.eq('property_id', query.propertyId);
+      listQuery = listQuery.eq('property_id', query.propertyId);
+    }
+    if (query.severity) {
+      countQuery = countQuery.eq('severity', query.severity);
+      listQuery = listQuery.eq('severity', query.severity);
+    }
+    const statusFilter = query.status ?? 'open';
+    countQuery = countQuery.eq('status', statusFilter);
+    listQuery = listQuery.eq('status', statusFilter);
+
+    if (query.alertType) {
+      countQuery = countQuery.eq('alert_type', query.alertType);
+      listQuery = listQuery.eq('alert_type', query.alertType);
+    }
+    if (authUser.propertyIds.length > 0) {
+      countQuery = countQuery.in('property_id', authUser.propertyIds);
+      listQuery = listQuery.in('property_id', authUser.propertyIds);
+    }
+
+    // Filter tasks to only open/in_progress.
+    listQuery = listQuery.in('tasks.status', ['open', 'in_progress']);
+
+    // Ordering + pagination.
+    listQuery = listQuery
+      .order('severity', { ascending: true })
+      .order('created_at', { ascending: false })
+      .range(skip, skip + query.limit - 1);
+
+    const [countResult, listResult] = await Promise.all([countQuery, listQuery]);
+
+    if (countResult.error) throw countResult.error;
+    if (listResult.error) throw listResult.error;
+
+    const total = countResult.count ?? 0;
 
     return reply.send({
       success: true,
-      data: alerts,
+      data: listResult.data,
       total,
       page: query.page,
       limit: query.limit,
@@ -68,17 +94,28 @@ export async function alertsRoutes(app: FastifyInstance) {
   // ─── GET /:id — single alert with full detail ─────────────────────────────
   app.get('/:id', { preHandler: auth }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const supabase = supabaseAdmin();
 
-    const alert = await db.alert.findFirst({
-      where: { id, orgId: req.authUser.orgId },
-      include: {
-        property: true,
-        report: {
-          include: { files: { where: { isCurrent: true }, select: { storagePath: true, originalName: true } } },
-        },
-        tasks: { include: { assignee: { select: { fullName: true, email: true } } } },
-      },
-    });
+    const { data: alert, error } = await supabase
+      .from('alerts')
+      .select(`
+        *,
+        property:properties!property_id ( * ),
+        report:reports!report_id (
+          *,
+          files:report_files ( storage_path, original_name )
+        ),
+        tasks (
+          *,
+          assignee:user_profiles!assigned_to ( full_name, email )
+        )
+      `)
+      .eq('id', id)
+      .eq('org_id', req.authUser.orgId)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
 
     if (!alert) {
       return reply.code(404).send({
@@ -89,7 +126,7 @@ export async function alertsRoutes(app: FastifyInstance) {
 
     if (
       req.authUser.propertyIds.length > 0 &&
-      !req.authUser.propertyIds.includes(alert.propertyId)
+      !req.authUser.propertyIds.includes(alert.property_id)
     ) {
       return reply.code(403).send({
         success: false,
@@ -108,10 +145,17 @@ export async function alertsRoutes(app: FastifyInstance) {
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
+      const supabase = supabaseAdmin();
 
-      const alert = await db.alert.findFirst({
-        where: { id, orgId: req.authUser.orgId },
-      });
+      const { data: alert, error: findError } = await supabase
+        .from('alerts')
+        .select('*')
+        .eq('id', id)
+        .eq('org_id', req.authUser.orgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (findError) throw findError;
 
       if (!alert) {
         return reply.code(404).send({
@@ -120,14 +164,18 @@ export async function alertsRoutes(app: FastifyInstance) {
         });
       }
 
-      const updated = await db.alert.update({
-        where: { id },
-        data: {
+      const { data: updated, error: updateError } = await supabase
+        .from('alerts')
+        .update({
           status: 'acknowledged',
-          acknowledgedBy: req.authUser.id,
-          acknowledgedAt: new Date(),
-        },
-      });
+          acknowledged_by: req.authUser.id,
+          acknowledged_at: new Date().toISOString(),
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
 
       await app.audit(req, {
         action: 'alert.acknowledge',
@@ -151,9 +199,17 @@ export async function alertsRoutes(app: FastifyInstance) {
         .object({ resolutionNotes: z.string().min(10) })
         .parse(req.body);
 
-      const alert = await db.alert.findFirst({
-        where: { id, orgId: req.authUser.orgId },
-      });
+      const supabase = supabaseAdmin();
+
+      const { data: alert, error: findError } = await supabase
+        .from('alerts')
+        .select('*')
+        .eq('id', id)
+        .eq('org_id', req.authUser.orgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (findError) throw findError;
 
       if (!alert) {
         return reply.code(404).send({
@@ -162,15 +218,19 @@ export async function alertsRoutes(app: FastifyInstance) {
         });
       }
 
-      const updated = await db.alert.update({
-        where: { id },
-        data: {
+      const { data: updated, error: updateError } = await supabase
+        .from('alerts')
+        .update({
           status: 'resolved',
-          resolvedBy: req.authUser.id,
-          resolvedAt: new Date(),
-          resolutionNotes: body.resolutionNotes,
-        },
-      });
+          resolved_by: req.authUser.id,
+          resolved_at: new Date().toISOString(),
+          resolution_notes: body.resolutionNotes,
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
 
       await app.audit(req, {
         action: 'alert.resolve',

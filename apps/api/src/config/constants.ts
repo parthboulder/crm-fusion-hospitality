@@ -109,8 +109,6 @@ export const PERMISSIONS = {
   ADMIN_AUDIT: 'admin:audit',
   ADMIN_SESSIONS: 'admin:sessions',
   ADMIN_PROPERTIES: 'admin:properties',
-  // AI
-  AI_SUMMARIES: 'ai:summaries',
 } as const;
 
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -133,7 +131,6 @@ export const ROLE_PERMISSIONS: Record<SystemRole, Permission[]> = {
     PERMISSIONS.TASKS_READ,
     PERMISSIONS.TASKS_CREATE,
     PERMISSIONS.TASKS_ASSIGN,
-    PERMISSIONS.AI_SUMMARIES,
     PERMISSIONS.ADMIN_AUDIT,
   ],
 
@@ -150,7 +147,6 @@ export const ROLE_PERMISSIONS: Record<SystemRole, Permission[]> = {
     PERMISSIONS.TASKS_READ,
     PERMISSIONS.TASKS_CREATE,
     PERMISSIONS.TASKS_ASSIGN,
-    PERMISSIONS.AI_SUMMARIES,
   ],
 
   general_manager: [
@@ -164,7 +160,6 @@ export const ROLE_PERMISSIONS: Record<SystemRole, Permission[]> = {
     PERMISSIONS.TASKS_READ,
     PERMISSIONS.TASKS_CREATE,
     PERMISSIONS.TASKS_COMPLETE,
-    PERMISSIONS.AI_SUMMARIES,
   ],
 
   revenue_manager: [
@@ -177,7 +172,6 @@ export const ROLE_PERMISSIONS: Record<SystemRole, Permission[]> = {
     PERMISSIONS.ALERTS_ACKNOWLEDGE,
     PERMISSIONS.TASKS_READ,
     PERMISSIONS.TASKS_CREATE,
-    PERMISSIONS.AI_SUMMARIES,
   ],
 
   finance: [

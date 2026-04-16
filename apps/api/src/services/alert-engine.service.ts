@@ -3,7 +3,7 @@
  * All thresholds are defined in constants.ts for single-source-of-truth.
  */
 
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../lib/supabase.js';
 import { ALERT_THRESHOLDS, SEVERITY } from '../config/constants.js';
 import type { DailyMetricsPayload, FinancialMetricsPayload } from '../types/index.js';
 
@@ -27,8 +27,15 @@ export class AlertEngineService {
     metrics: Partial<DailyMetricsPayload>,
     financials: Partial<FinancialMetricsPayload>,
   ): Promise<void> {
-    const property = await db.property.findUnique({ where: { id: propertyId } });
-    if (!property) return;
+    const supabase = supabaseAdmin();
+
+    const { data: property, error: propertyError } = await supabase
+      .from('properties')
+      .select('*')
+      .eq('id', propertyId)
+      .single();
+
+    if (propertyError || !property) return;
 
     const alerts = [
       ...this.evaluatePerformanceMetrics(metrics, property),
@@ -39,38 +46,50 @@ export class AlertEngineService {
 
     // Bulk insert alerts + auto-create tasks for critical/high.
     for (const alert of alerts) {
-      const created = await db.alert.create({
-        data: {
-          orgId,
-          propertyId,
-          reportId,
-          alertType: alert.alertType,
+      const { data: created, error: alertError } = await supabase
+        .from('alerts')
+        .insert({
+          org_id: orgId,
+          property_id: propertyId,
+          report_id: reportId,
+          alert_type: alert.alertType,
           severity: alert.severity,
           title: alert.title,
           description: alert.description,
-          metricName: alert.metricName,
-          metricValue: alert.metricValue !== undefined ? String(alert.metricValue) : null,
-          thresholdValue: alert.thresholdValue !== undefined ? String(alert.thresholdValue) : null,
-          priorValue: alert.priorValue !== undefined ? String(alert.priorValue) : null,
-          pctChange: alert.pctChange !== undefined ? String(alert.pctChange) : null,
+          metric_name: alert.metricName,
+          metric_value: alert.metricValue !== undefined ? String(alert.metricValue) : null,
+          threshold_value: alert.thresholdValue !== undefined ? String(alert.thresholdValue) : null,
+          prior_value: alert.priorValue !== undefined ? String(alert.priorValue) : null,
+          pct_change: alert.pctChange !== undefined ? String(alert.pctChange) : null,
           status: 'open',
-        },
-      });
+        })
+        .select()
+        .single();
+
+      if (alertError || !created) {
+        throw new Error(`Failed to create alert: ${alertError?.message}`);
+      }
 
       // Auto-create task for critical and high severity alerts.
       if (alert.severity === SEVERITY.CRITICAL || alert.severity === SEVERITY.HIGH) {
-        await db.task.create({
-          data: {
-            orgId,
-            propertyId,
-            alertId: created.id,
+        const { error: taskError } = await supabase
+          .from('tasks')
+          .insert({
+            org_id: orgId,
+            property_id: propertyId,
+            alert_id: created.id,
             title: `Investigate: ${alert.title}`,
             description: alert.description,
-            taskType: alert.alertType,
+            task_type: alert.alertType,
             priority: alert.severity,
             status: 'open',
-          },
-        });
+          })
+          .select()
+          .single();
+
+        if (taskError) {
+          throw new Error(`Failed to create task: ${taskError.message}`);
+        }
       }
     }
   }
@@ -79,7 +98,7 @@ export class AlertEngineService {
 
   private evaluatePerformanceMetrics(
     metrics: Partial<DailyMetricsPayload>,
-    property: { id: string; name: string; adrFloor: unknown },
+    property: { id: string; name: string; adr_floor: unknown },
   ) {
     const alerts: AlertCandidate[] = [];
 
@@ -128,7 +147,7 @@ export class AlertEngineService {
     }
 
     // ADR below floor.
-    const adrFloor = property.adrFloor ? Number(property.adrFloor) : null;
+    const adrFloor = property.adr_floor ? Number(property.adr_floor) : null;
     if (metrics.adr != null && adrFloor != null) {
       const pctBelowFloor = ((adrFloor - metrics.adr) / adrFloor) * 100;
       if (pctBelowFloor > ALERT_THRESHOLDS.ADR_BELOW_FLOOR_PCT) {

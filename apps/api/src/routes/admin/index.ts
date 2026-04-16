@@ -4,8 +4,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../../lib/supabase.js';
 import { env } from '../../config/env.js';
 import { PERMISSIONS } from '../../config/constants.js';
 
@@ -14,14 +13,18 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── GET /users ───────────────────────────────────────────────────────────
   app.get('/users', { preHandler: adminAuth }, async (req, reply) => {
-    const users = await db.userProfile.findMany({
-      where: { orgId: req.authUser.orgId },
-      include: {
-        role: { select: { name: true, displayName: true } },
-        _count: { select: { sessions: { where: { isActive: true } } } },
-      },
-      orderBy: { fullName: 'asc' },
-    });
+    const supabase = supabaseAdmin();
+
+    const { data: users, error } = await supabase
+      .from('user_profiles')
+      .select(`
+        *,
+        role:roles!role_id ( name, display_name )
+      `)
+      .eq('org_id', req.authUser.orgId)
+      .order('full_name', { ascending: true });
+
+    if (error) throw error;
 
     return reply.send({ success: true, data: users });
   });
@@ -37,11 +40,9 @@ export async function adminRoutes(app: FastifyInstance) {
       })
       .parse(req.body);
 
-    // Create user in Supabase Auth (sends invite email).
-    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = supabaseAdmin();
 
+    // Create user in Supabase Auth (sends invite email).
     const { data: authData, error: authError } = await supabase.auth.admin.inviteUserByEmail(
       body.email,
       { data: { orgId: req.authUser.orgId, fullName: body.fullName } },
@@ -55,27 +56,34 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
 
-    const user = await db.userProfile.create({
-      data: {
+    const { data: user, error: profileError } = await supabase
+      .from('user_profiles')
+      .insert({
         id: authData.user.id,
-        orgId: req.authUser.orgId,
+        org_id: req.authUser.orgId,
         email: body.email.toLowerCase(),
-        fullName: body.fullName,
-        roleId: body.roleId,
-        ...(body.propertyIds?.length
-          ? {
-              userPropertyAccess: {
-                createMany: {
-                  data: body.propertyIds.map((propertyId) => ({
-                    propertyId,
-                    grantedBy: req.authUser.id,
-                  })),
-                },
-              },
-            }
-          : {}),
-      },
-    });
+        full_name: body.fullName,
+        role_id: body.roleId,
+      })
+      .select()
+      .single();
+
+    if (profileError) throw profileError;
+
+    // Grant property access if provided.
+    if (body.propertyIds?.length) {
+      const accessRows = body.propertyIds.map((propertyId) => ({
+        user_id: authData.user!.id,
+        property_id: propertyId,
+        granted_by: req.authUser.id,
+      }));
+
+      const { error: accessError } = await supabase
+        .from('user_property_access')
+        .insert(accessRows);
+
+      if (accessError) throw accessError;
+    }
 
     await app.audit(req, {
       action: 'admin.user.invite',
@@ -98,9 +106,17 @@ export async function adminRoutes(app: FastifyInstance) {
       })
       .parse(req.body);
 
-    const before = await db.userProfile.findFirst({
-      where: { id, orgId: req.authUser.orgId },
-    });
+    const supabase = supabaseAdmin();
+
+    const { data: before, error: findError } = await supabase
+      .from('user_profiles')
+      .select('*')
+      .eq('id', id)
+      .eq('org_id', req.authUser.orgId)
+      .limit(1)
+      .maybeSingle();
+
+    if (findError) throw findError;
 
     if (!before) {
       return reply.code(404).send({
@@ -117,25 +133,40 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
 
-    const updated = await db.userProfile.update({
-      where: { id },
-      data: {
-        ...(body.roleId !== undefined && { roleId: body.roleId }),
-        ...(body.isActive !== undefined && { isActive: body.isActive }),
-      },
-    });
+    const updateData: Record<string, unknown> = {};
+    if (body.roleId !== undefined) updateData.role_id = body.roleId;
+    if (body.isActive !== undefined) updateData.is_active = body.isActive;
+
+    const { data: updated, error: updateError } = await supabase
+      .from('user_profiles')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
 
     // Update property access if provided.
     if (body.propertyIds !== undefined) {
-      await db.userPropertyAccess.deleteMany({ where: { userId: id } });
+      // Remove existing access.
+      await supabase
+        .from('user_property_access')
+        .delete()
+        .eq('user_id', id);
+
+      // Insert new access.
       if (body.propertyIds.length > 0) {
-        await db.userPropertyAccess.createMany({
-          data: body.propertyIds.map((propertyId) => ({
-            userId: id,
-            propertyId,
-            grantedBy: req.authUser.id,
-          })),
-        });
+        const accessRows = body.propertyIds.map((propertyId) => ({
+          user_id: id,
+          property_id: propertyId,
+          granted_by: req.authUser.id,
+        }));
+
+        const { error: accessError } = await supabase
+          .from('user_property_access')
+          .insert(accessRows);
+
+        if (accessError) throw accessError;
       }
     }
 
@@ -143,7 +174,7 @@ export async function adminRoutes(app: FastifyInstance) {
       action: 'admin.user.update',
       resourceType: 'user',
       resourceId: id,
-      beforeValue: { roleId: before.roleId, isActive: before.isActive },
+      beforeValue: { role_id: before.role_id, is_active: before.is_active },
       afterValue: body,
     });
 
@@ -156,11 +187,30 @@ export async function adminRoutes(app: FastifyInstance) {
     { preHandler: [app.verifyAuth, app.requirePermission(PERMISSIONS.ADMIN_SESSIONS)] },
     async (req, reply) => {
       const { id } = req.params as { id: string };
+      const supabase = supabaseAdmin();
 
-      await db.userSession.updateMany({
-        where: { userId: id, isActive: true },
-        data: { isActive: false, revokedAt: new Date(), revokedBy: req.authUser.id },
-      });
+      // Supabase doesn't have updateMany — fetch active sessions and update them.
+      const { data: activeSessions, error: fetchError } = await supabase
+        .from('user_sessions')
+        .select('id')
+        .eq('user_id', id)
+        .eq('is_active', true);
+
+      if (fetchError) throw fetchError;
+
+      if (activeSessions && activeSessions.length > 0) {
+        const sessionIds = activeSessions.map((s) => s.id);
+        const { error: revokeError } = await supabase
+          .from('user_sessions')
+          .update({
+            is_active: false,
+            revoked_at: new Date().toISOString(),
+            revoked_by: req.authUser.id,
+          })
+          .in('id', sessionIds);
+
+        if (revokeError) throw revokeError;
+      }
 
       await app.audit(req, {
         action: 'admin.sessions.revoke_all',
@@ -190,35 +240,53 @@ export async function adminRoutes(app: FastifyInstance) {
         .parse(req.query);
 
       const skip = (query.page - 1) * query.limit;
+      const supabase = supabaseAdmin();
 
-      const where = {
-        orgId: req.authUser.orgId,
-        ...(query.userId && { userId: query.userId }),
-        ...(query.action && { action: { contains: query.action } }),
-        ...(query.resourceType && { resourceType: query.resourceType }),
-        ...(query.from || query.to
-          ? {
-              createdAt: {
-                ...(query.from && { gte: new Date(query.from) }),
-                ...(query.to && { lte: new Date(query.to) }),
-              },
-            }
-          : {}),
-      };
+      let countQuery = supabase
+        .from('audit_logs')
+        .select('*', { count: 'exact', head: true })
+        .eq('org_id', req.authUser.orgId);
 
-      const [total, logs] = await Promise.all([
-        db.auditLog.count({ where }),
-        db.auditLog.findMany({
-          where,
-          skip,
-          take: query.limit,
-          orderBy: { createdAt: 'desc' },
-        }),
-      ]);
+      let listQuery = supabase
+        .from('audit_logs')
+        .select('*')
+        .eq('org_id', req.authUser.orgId);
+
+      if (query.userId) {
+        countQuery = countQuery.eq('user_id', query.userId);
+        listQuery = listQuery.eq('user_id', query.userId);
+      }
+      if (query.action) {
+        countQuery = countQuery.ilike('action', `%${query.action}%`);
+        listQuery = listQuery.ilike('action', `%${query.action}%`);
+      }
+      if (query.resourceType) {
+        countQuery = countQuery.eq('resource_type', query.resourceType);
+        listQuery = listQuery.eq('resource_type', query.resourceType);
+      }
+      if (query.from) {
+        countQuery = countQuery.gte('created_at', new Date(query.from).toISOString());
+        listQuery = listQuery.gte('created_at', new Date(query.from).toISOString());
+      }
+      if (query.to) {
+        countQuery = countQuery.lte('created_at', new Date(query.to).toISOString());
+        listQuery = listQuery.lte('created_at', new Date(query.to).toISOString());
+      }
+
+      listQuery = listQuery
+        .order('created_at', { ascending: false })
+        .range(skip, skip + query.limit - 1);
+
+      const [countResult, listResult] = await Promise.all([countQuery, listQuery]);
+
+      if (countResult.error) throw countResult.error;
+      if (listResult.error) throw listResult.error;
+
+      const total = countResult.count ?? 0;
 
       return reply.send({
         success: true,
-        data: logs,
+        data: listResult.data,
         total,
         page: query.page,
         limit: query.limit,
@@ -232,14 +300,21 @@ export async function adminRoutes(app: FastifyInstance) {
     '/roles',
     { preHandler: [app.verifyAuth, app.requirePermission(PERMISSIONS.ADMIN_ROLES)] },
     async (req, reply) => {
-      const roles = await db.role.findMany({
-        where: { orgId: req.authUser.orgId },
-        include: {
-          rolePermissions: { include: { permission: true } },
-          _count: { select: { userProfiles: true } },
-        },
-        orderBy: { displayName: 'asc' },
-      });
+      const supabase = supabaseAdmin();
+
+      const { data: roles, error } = await supabase
+        .from('roles')
+        .select(`
+          *,
+          role_permissions (
+            *,
+            permission:permissions ( * )
+          )
+        `)
+        .eq('org_id', req.authUser.orgId)
+        .order('display_name', { ascending: true });
+
+      if (error) throw error;
 
       return reply.send({ success: true, data: roles });
     },

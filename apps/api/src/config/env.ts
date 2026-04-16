@@ -47,6 +47,8 @@ const schema = z.object({
   ONEDRIVE_TENANT_ID: z.string().optional(),
   ONEDRIVE_WEBHOOK_SECRET: z.string().optional(),
 
+  STATIC_DIR: z.string().optional(),
+
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_API_MAX: z.coerce.number().default(300),
   SESSION_MAX_CONCURRENT: z.coerce.number().default(5),

@@ -12,7 +12,7 @@
  */
 
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
-import { getAdminClient } from '../_shared/supabase-client.ts';
+import { getAdminClient, verifyServiceAuth } from '../_shared/supabase-client.ts';
 
 const THRESHOLDS = {
   OCCUPANCY_DROP_PCT: 10,
@@ -28,6 +28,13 @@ const THRESHOLDS = {
 serve(async (req: Request) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
+  }
+
+  if (!verifyServiceAuth(req)) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const { reportId, propertyId, orgId, metrics, financials } = await req.json() as {

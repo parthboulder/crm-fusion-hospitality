@@ -2,7 +2,6 @@
  * Shared TypeScript types for the API — augments Fastify's request/reply types.
  */
 
-import type { UserProfile, Role } from '@fusion/db';
 import type { Permission, SystemRole } from '../config/constants.js';
 
 // ─── Auth Context ──────────────────────────────────────────────────────────────

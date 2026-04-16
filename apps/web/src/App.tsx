@@ -14,7 +14,6 @@ import { PerformanceHubPage } from './pages/PerformanceHubPage';
 import { StoneriverDashboardPage } from './pages/StoneriverDashboardPage';
 import { FlashReportDashboardPage } from './pages/FlashReportDashboardPage';
 import { EngineeringDashboardPage } from './pages/EngineeringDashboardPage';
-import { DocumentsPage } from './pages/DocumentsPage';
 import { ScannerPage } from './pages/ScannerPage';
 import { OcrUploadsPage } from './pages/OcrUploadsPage';
 
@@ -42,7 +41,6 @@ export default function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="properties/:id" element={<PropertyPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
           <Route path="ocr" element={<OcrUploadsPage />} />
           <Route path="admin" element={<AdminPage />} />
           <Route path="stoneriver" element={<PerformanceHubPage />} />

@@ -7,7 +7,7 @@ import { z } from 'zod';
 import * as argon2 from 'argon2';
 import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
-import { db } from '@fusion/db';
+import { supabaseAdmin } from '../../lib/supabase.js';
 import { env } from '../../config/env.js';
 
 const loginSchema = z.object({
@@ -26,12 +26,24 @@ export async function authRoutes(app: FastifyInstance) {
       config: { rateLimit: { max: env.RATE_LIMIT_AUTH_MAX, timeWindow: '15 minutes' } },
     },
     async (req, reply) => {
+      const supabase = supabaseAdmin();
       const body = loginSchema.parse(req.body);
 
-      const user = await db.userProfile.findFirst({
-        where: { email: body.email.toLowerCase(), isActive: true },
-        include: { role: true },
-      });
+      const { data: user, error: userError } = await supabase
+        .from('user_profiles')
+        .select('*, roles(*)')
+        .eq('email', body.email.toLowerCase())
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle();
+
+      if (userError) {
+        req.log.error({ err: userError }, 'Failed to query user_profiles');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+        });
+      }
 
       if (!user) {
         // Constant-time response to prevent user enumeration.
@@ -78,8 +90,8 @@ export async function authRoutes(app: FastifyInstance) {
 
       // MFA enforcement for sensitive roles.
       const mfaRequiredRoles = env.MFA_REQUIRED_ROLES.split(',');
-      if (user.mfaEnabled || mfaRequiredRoles.includes(user.role.name)) {
-        if (!user.mfaEnabled) {
+      if (user.mfa_enabled || mfaRequiredRoles.includes(user.roles.name)) {
+        if (!user.mfa_enabled) {
           // MFA required but not set up — force setup flow.
           return reply.code(403).send({
             success: false,
@@ -94,8 +106,8 @@ export async function authRoutes(app: FastifyInstance) {
           });
         }
 
-        // Retrieve stored TOTP secret (stored encrypted in metadata).
-        const totpSecret = (user as unknown as { totpSecret?: string }).totpSecret;
+        // Retrieve stored TOTP secret (stored in metadata JSONB column).
+        const totpSecret = (user.metadata as Record<string, unknown> | null)?.totp_secret as string | undefined;
         if (!totpSecret || !authenticator.check(body.mfaCode, totpSecret)) {
           await app.audit(req, {
             action: 'auth.mfa.failed',
@@ -111,44 +123,73 @@ export async function authRoutes(app: FastifyInstance) {
       }
 
       // Enforce concurrent session limit.
-      const activeSessions = await db.userSession.count({
-        where: { userId: user.id, isActive: true, expiresAt: { gt: new Date() } },
-      });
+      const { count: activeSessions, error: countError } = await supabase
+        .from('user_sessions')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id)
+        .eq('is_active', true)
+        .gt('expires_at', new Date().toISOString());
 
-      if (activeSessions >= env.SESSION_MAX_CONCURRENT) {
-        // Revoke oldest session to make room.
-        const oldest = await db.userSession.findFirst({
-          where: { userId: user.id, isActive: true },
-          orderBy: { lastActivity: 'asc' },
+      if (countError) {
+        req.log.error({ err: countError }, 'Failed to count active sessions');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
         });
+      }
+
+      if ((activeSessions ?? 0) >= env.SESSION_MAX_CONCURRENT) {
+        // Revoke oldest session to make room.
+        const { data: oldest } = await supabase
+          .from('user_sessions')
+          .select('*')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .order('last_activity', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
         if (oldest) {
-          await db.userSession.update({
-            where: { id: oldest.id },
-            data: { isActive: false, revokedAt: new Date() },
-          });
+          await supabase
+            .from('user_sessions')
+            .update({ is_active: false, revoked_at: new Date().toISOString() })
+            .eq('id', oldest.id);
         }
       }
 
       const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-      const session = await db.userSession.create({
-        data: {
-          userId: user.id,
-          tokenHash: '', // will be updated after JWT is signed
-          ipAddress: req.ip,
-          userAgent: req.headers['user-agent'] ?? null,
-          expiresAt,
-        },
-      });
+      const { data: session, error: sessionError } = await supabase
+        .from('user_sessions')
+        .insert({
+          user_id: user.id,
+          token_hash: '', // will be updated after JWT is signed
+          ip_address: req.ip,
+          user_agent: req.headers['user-agent'] ?? null,
+          expires_at: expiresAt.toISOString(),
+        })
+        .select()
+        .single();
+
+      if (sessionError || !session) {
+        req.log.error({ err: sessionError }, 'Failed to create session');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+        });
+      }
 
       const token = app.jwt.sign(
-        { sub: user.id, sessionId: session.id, orgId: user.orgId },
+        { sub: user.id, sessionId: session.id, orgId: user.org_id },
         { expiresIn: '8h' },
       );
 
       // Store hash of token (not the token itself).
       const { createHash } = await import('node:crypto');
       const tokenHash = createHash('sha256').update(token).digest('hex');
-      await db.userSession.update({ where: { id: session.id }, data: { tokenHash } });
+      await supabase
+        .from('user_sessions')
+        .update({ token_hash: tokenHash })
+        .eq('id', session.id);
 
       await app.audit(req, {
         action: 'auth.login.success',
@@ -156,14 +197,14 @@ export async function authRoutes(app: FastifyInstance) {
         resourceId: user.id,
       });
 
-      await db.userProfile.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-      });
+      await supabase
+        .from('user_profiles')
+        .update({ last_login_at: new Date().toISOString() })
+        .eq('id', user.id);
 
       reply.setCookie('session_token', token, {
         httpOnly: true,
-        secure: env.NODE_ENV === 'production',
+        secure: env.NODE_ENV === 'production' || env.NODE_ENV === 'test',
         sameSite: 'strict',
         path: '/',
         expires: expiresAt,
@@ -175,9 +216,9 @@ export async function authRoutes(app: FastifyInstance) {
           user: {
             id: user.id,
             email: user.email,
-            fullName: user.fullName,
-            role: user.role.name,
-            orgId: user.orgId,
+            fullName: user.full_name,
+            role: user.roles.name,
+            orgId: user.org_id,
           },
           expiresAt,
         },
@@ -192,6 +233,7 @@ export async function authRoutes(app: FastifyInstance) {
       config: { rateLimit: { max: env.RATE_LIMIT_AUTH_MAX, timeWindow: '15 minutes' } },
     },
     async (req, reply) => {
+      const supabase = supabaseAdmin();
       const { access_token } = z
         .object({ access_token: z.string().min(1), provider: z.string() })
         .parse(req.body);
@@ -214,10 +256,21 @@ export async function authRoutes(app: FastifyInstance) {
       const oauthEmail = supaUser.user.email.toLowerCase();
 
       // Match against existing user profile.
-      const user = await db.userProfile.findFirst({
-        where: { email: oauthEmail, isActive: true },
-        include: { role: true },
-      });
+      const { data: user, error: userError } = await supabase
+        .from('user_profiles')
+        .select('*, roles(*)')
+        .eq('email', oauthEmail)
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle();
+
+      if (userError) {
+        req.log.error({ err: userError }, 'Failed to query user_profiles');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+        });
+      }
 
       if (!user) {
         await app.audit(req, {
@@ -237,42 +290,71 @@ export async function authRoutes(app: FastifyInstance) {
       }
 
       // Enforce concurrent session limit.
-      const activeSessions = await db.userSession.count({
-        where: { userId: user.id, isActive: true, expiresAt: { gt: new Date() } },
-      });
+      const { count: activeSessions, error: countError } = await supabase
+        .from('user_sessions')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id)
+        .eq('is_active', true)
+        .gt('expires_at', new Date().toISOString());
 
-      if (activeSessions >= env.SESSION_MAX_CONCURRENT) {
-        const oldest = await db.userSession.findFirst({
-          where: { userId: user.id, isActive: true },
-          orderBy: { lastActivity: 'asc' },
+      if (countError) {
+        req.log.error({ err: countError }, 'Failed to count active sessions');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
         });
+      }
+
+      if ((activeSessions ?? 0) >= env.SESSION_MAX_CONCURRENT) {
+        const { data: oldest } = await supabase
+          .from('user_sessions')
+          .select('*')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .order('last_activity', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
         if (oldest) {
-          await db.userSession.update({
-            where: { id: oldest.id },
-            data: { isActive: false, revokedAt: new Date() },
-          });
+          await supabase
+            .from('user_sessions')
+            .update({ is_active: false, revoked_at: new Date().toISOString() })
+            .eq('id', oldest.id);
         }
       }
 
       const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-      const session = await db.userSession.create({
-        data: {
-          userId: user.id,
-          tokenHash: '',
-          ipAddress: req.ip,
-          userAgent: req.headers['user-agent'] ?? null,
-          expiresAt,
-        },
-      });
+      const { data: session, error: sessionError } = await supabase
+        .from('user_sessions')
+        .insert({
+          user_id: user.id,
+          token_hash: '',
+          ip_address: req.ip,
+          user_agent: req.headers['user-agent'] ?? null,
+          expires_at: expiresAt.toISOString(),
+        })
+        .select()
+        .single();
+
+      if (sessionError || !session) {
+        req.log.error({ err: sessionError }, 'Failed to create session');
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+        });
+      }
 
       const token = app.jwt.sign(
-        { sub: user.id, sessionId: session.id, orgId: user.orgId },
+        { sub: user.id, sessionId: session.id, orgId: user.org_id },
         { expiresIn: '8h' },
       );
 
       const { createHash } = await import('node:crypto');
       const tokenHash = createHash('sha256').update(token).digest('hex');
-      await db.userSession.update({ where: { id: session.id }, data: { tokenHash } });
+      await supabase
+        .from('user_sessions')
+        .update({ token_hash: tokenHash })
+        .eq('id', session.id);
 
       await app.audit(req, {
         action: 'auth.oauth.success',
@@ -281,14 +363,14 @@ export async function authRoutes(app: FastifyInstance) {
         afterValue: { provider: 'azure' },
       });
 
-      await db.userProfile.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-      });
+      await supabase
+        .from('user_profiles')
+        .update({ last_login_at: new Date().toISOString() })
+        .eq('id', user.id);
 
       reply.setCookie('session_token', token, {
         httpOnly: true,
-        secure: env.NODE_ENV === 'production',
+        secure: env.NODE_ENV === 'production' || env.NODE_ENV === 'test',
         sameSite: 'strict',
         path: '/',
         expires: expiresAt,
@@ -300,9 +382,9 @@ export async function authRoutes(app: FastifyInstance) {
           user: {
             id: user.id,
             email: user.email,
-            fullName: user.fullName,
-            role: user.role.name,
-            orgId: user.orgId,
+            fullName: user.full_name,
+            role: user.roles.name,
+            orgId: user.org_id,
           },
           expiresAt,
         },
@@ -315,10 +397,12 @@ export async function authRoutes(app: FastifyInstance) {
     '/logout',
     { preHandler: [app.verifyAuth] },
     async (req, reply) => {
-      await db.userSession.update({
-        where: { id: req.authUser.sessionId },
-        data: { isActive: false, revokedAt: new Date() },
-      });
+      const supabase = supabaseAdmin();
+
+      await supabase
+        .from('user_sessions')
+        .update({ is_active: false, revoked_at: new Date().toISOString() })
+        .eq('id', req.authUser.sessionId);
 
       await app.audit(req, { action: 'auth.logout', resourceType: 'auth' });
 
@@ -334,29 +418,60 @@ export async function authRoutes(app: FastifyInstance) {
 
   // ─── POST /mfa/setup ────────────────────────────────────────────────────────
   app.post('/mfa/setup', { preHandler: [app.verifyAuth] }, async (req, reply) => {
+    const supabase = supabaseAdmin();
     const secret = authenticator.generateSecret();
     const otpauth = authenticator.keyuri(req.authUser.email, 'Fusion Hospitality', secret);
     const qrDataUrl = await QRCode.toDataURL(otpauth);
 
     // Store secret temporarily (pending confirmation).
-    await db.$executeRaw`
-      UPDATE user_profiles
-      SET metadata = jsonb_set(metadata, '{pending_totp_secret}', ${JSON.stringify(secret)}::jsonb)
-      WHERE id = ${req.authUser.id}::uuid
-    `;
+    // Fetch current metadata, merge, and update via Supabase ORM.
+    const { data: current } = await supabase
+      .from('user_profiles')
+      .select('metadata')
+      .eq('id', req.authUser.id)
+      .single();
 
-    return reply.send({ success: true, data: { qrDataUrl, secret } });
+    const updatedMetadata = {
+      ...(current?.metadata ?? {}),
+      pending_totp_secret: secret,
+    };
+
+    const { error: updateError } = await supabase
+      .from('user_profiles')
+      .update({ metadata: updatedMetadata })
+      .eq('id', req.authUser.id);
+
+    if (updateError) {
+      req.log.error({ err: updateError }, 'Failed to store pending TOTP secret');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
+
+    return reply.send({ success: true, data: { qrDataUrl } });
   });
 
   // ─── POST /mfa/confirm ──────────────────────────────────────────────────────
   app.post('/mfa/confirm', { preHandler: [app.verifyAuth] }, async (req, reply) => {
+    const supabase = supabaseAdmin();
     const { code } = z.object({ code: z.string().length(6) }).parse(req.body);
 
-    const user = await db.$queryRaw<Array<{ metadata: Record<string, string> }>>`
-      SELECT metadata FROM user_profiles WHERE id = ${req.authUser.id}::uuid
-    `;
+    const { data: userRow, error: fetchError } = await supabase
+      .from('user_profiles')
+      .select('metadata')
+      .eq('id', req.authUser.id)
+      .single();
 
-    const pending = user[0]?.metadata?.['pending_totp_secret'];
+    if (fetchError) {
+      req.log.error({ err: fetchError }, 'Failed to fetch user metadata');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
+
+    const pending = userRow?.metadata?.['pending_totp_secret'];
     if (!pending || !authenticator.check(code, pending)) {
       return reply.code(400).send({
         success: false,
@@ -364,17 +479,23 @@ export async function authRoutes(app: FastifyInstance) {
       });
     }
 
-    await db.$executeRaw`
-      UPDATE user_profiles
-      SET
-        mfa_enabled = true,
-        metadata = jsonb_set(
-          metadata - 'pending_totp_secret',
-          '{totp_secret}',
-          ${JSON.stringify(pending)}::jsonb
-        )
-      WHERE id = ${req.authUser.id}::uuid
-    `;
+    // Move pending secret to confirmed, enable MFA.
+    const currentMetadata = userRow.metadata ?? {};
+    const { pending_totp_secret: _, ...restMetadata } = currentMetadata as Record<string, unknown>;
+    const updatedMetadata = { ...restMetadata, totp_secret: pending };
+
+    const { error: updateError } = await supabase
+      .from('user_profiles')
+      .update({ mfa_enabled: true, metadata: updatedMetadata })
+      .eq('id', req.authUser.id);
+
+    if (updateError) {
+      req.log.error({ err: updateError }, 'Failed to enable MFA');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
 
     await app.audit(req, { action: 'auth.mfa.enabled', resourceType: 'auth' });
     return reply.send({ success: true, data: { message: 'MFA enabled.' } });
@@ -382,21 +503,46 @@ export async function authRoutes(app: FastifyInstance) {
 
   // ─── GET /sessions ──────────────────────────────────────────────────────────
   app.get('/sessions', { preHandler: [app.verifyAuth] }, async (req, reply) => {
-    const sessions = await db.userSession.findMany({
-      where: { userId: req.authUser.id, isActive: true },
-      select: { id: true, ipAddress: true, userAgent: true, lastActivity: true, createdAt: true },
-      orderBy: { lastActivity: 'desc' },
-    });
+    const supabase = supabaseAdmin();
+
+    const { data: sessions, error: sessionsError } = await supabase
+      .from('user_sessions')
+      .select('id, ip_address, user_agent, last_activity, created_at')
+      .eq('user_id', req.authUser.id)
+      .eq('is_active', true)
+      .order('last_activity', { ascending: false });
+
+    if (sessionsError) {
+      req.log.error({ err: sessionsError }, 'Failed to fetch sessions');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
+
     return reply.send({ success: true, data: sessions });
   });
 
   // ─── DELETE /sessions/:id ───────────────────────────────────────────────────
   app.delete('/sessions/:id', { preHandler: [app.verifyAuth] }, async (req, reply) => {
+    const supabase = supabaseAdmin();
     const { id } = req.params as { id: string };
 
-    const session = await db.userSession.findFirst({
-      where: { id, userId: req.authUser.id },
-    });
+    const { data: session, error: sessionError } = await supabase
+      .from('user_sessions')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', req.authUser.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (sessionError) {
+      req.log.error({ err: sessionError }, 'Failed to query session');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
 
     if (!session) {
       return reply.code(404).send({
@@ -405,10 +551,22 @@ export async function authRoutes(app: FastifyInstance) {
       });
     }
 
-    await db.userSession.update({
-      where: { id },
-      data: { isActive: false, revokedAt: new Date(), revokedBy: req.authUser.id },
-    });
+    const { error: updateError } = await supabase
+      .from('user_sessions')
+      .update({
+        is_active: false,
+        revoked_at: new Date().toISOString(),
+        revoked_by: req.authUser.id,
+      })
+      .eq('id', id);
+
+    if (updateError) {
+      req.log.error({ err: updateError }, 'Failed to revoke session');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
+      });
+    }
 
     await app.audit(req, {
       action: 'auth.session.revoked',
