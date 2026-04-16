@@ -9,6 +9,7 @@ import {
   ArrowRightStartOnRectangleIcon,
   BuildingOffice2Icon,
   ChartBarIcon,
+  FolderOpenIcon,
   MagnifyingGlassCircleIcon,
   CloudArrowUpIcon,
 } from '@heroicons/react/24/outline';
@@ -19,6 +20,7 @@ import { api } from '../../lib/api-client';
 const nav = [
   { label: 'Dashboard',   to: '/dashboard',   Icon: HomeIcon },
   { label: 'Performance', to: '/stoneriver',  Icon: ChartBarIcon },
+  { label: 'Documents',   to: '/documents',  Icon: FolderOpenIcon },
   { label: 'OCR Uploads', to: '/ocr',        Icon: CloudArrowUpIcon },
   { label: 'File Scanner',to: '/scanner',    Icon: MagnifyingGlassCircleIcon },
 ];

@@ -21,6 +21,9 @@ import {
   PhotoIcon,
   TrashIcon,
   ArrowUturnLeftIcon,
+  ArrowDownTrayIcon,
+  ClockIcon,
+  CpuChipIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
 import { xhrUpload, UploadError } from '../lib/xhr-upload';
@@ -156,6 +159,23 @@ interface BatchState {
 }
 
 type StatusFilter = 'all' | 'active' | 'completed' | 'failed';
+type ViewMode = 'list' | 'compact';
+
+const JOBS_PER_PAGE = 20;
+
+function exportJobsCsv(jobs: OcrJob[]) {
+  const header = 'Name,Status,Type,Size (bytes),Created,Completed\n';
+  const rows = jobs.map((j) =>
+    `"${j.originalName}","${j.status}","${j.fileType}",${j.fileSizeBytes},"${j.createdAt}","${j.completedAt ?? ''}"`,
+  ).join('\n');
+  const blob = new Blob([header + rows], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ocr-jobs-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export function OcrUploadsPage() {
   const qc = useQueryClient();
@@ -163,20 +183,28 @@ export function OcrUploadsPage() {
   const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [batch, setBatch] = useState<BatchState | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [fileTypeFilter, setFileTypeFilter] = useState('');
+  const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [page, setPage] = useState(1);
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
-  // Polling strategy:
-  //   - 3s while any job is pending/processing (tight feedback loop)
-  //   - 60s when the page is idle (still catches worker-side state changes)
-  //   - paused entirely when the browser tab is hidden
-  // The `refetchIntervalInBackground: false` default handles the tab-hidden case.
-  const { data: listData, isLoading } = useQuery<{ data: OcrJob[]; total: number }>({
-    queryKey: ['ocr-jobs'],
-    queryFn: () => api.get('/ocr/jobs?limit=50'),
+  // Build query params for the API
+  const queryParams = (() => {
+    const params = new URLSearchParams({ limit: String(JOBS_PER_PAGE), page: String(page) });
+    if (statusFilter !== 'all' && statusFilter !== 'active') params.set('status', statusFilter);
+    if (statusFilter === 'active') params.set('status', 'pending'); // active = pending + processing
+    return params.toString();
+  })();
+
+  const { data: listData, isLoading } = useQuery<{ data: OcrJob[]; total: number; totalPages: number }>({
+    queryKey: ['ocr-jobs', page, statusFilter],
+    queryFn: () => api.get(`/ocr/jobs?${queryParams}`),
     refetchInterval: (q) => {
       const list = q.state.data?.data ?? [];
-      return list.some((j) => ACTIVE_STATUSES.includes(j.status)) ? 3000 : 60_000;
+      return list.some((j) => ACTIVE_STATUSES.includes(j.status)) ? 3000 : 30_000;
     },
     refetchIntervalInBackground: false,
   });
@@ -366,15 +394,45 @@ export function OcrUploadsPage() {
     abortRef.current?.abort();
   }, []);
 
+  // Stage files for preview instead of uploading immediately.
+  const stageFiles = useCallback((files: File[]) => {
+    const accepted = files.filter(isAcceptedFile);
+    const skipped = files.filter((f) => !isAcceptedFile(f));
+    if (skipped.length > 0) {
+      setUploadErrors(skipped.slice(0, 10).map((f) => `${f.name}: skipped (unsupported type or size)`));
+    }
+    if (accepted.length > 0) {
+      setStagedFiles((prev) => [...prev, ...accepted]);
+    }
+  }, []);
+
+  const removeStagedFile = useCallback((index: number) => {
+    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const clearStagedFiles = useCallback(() => {
+    setStagedFiles([]);
+    setUploadErrors([]);
+  }, []);
+
+  const uploadAllStaged = useCallback(() => {
+    if (stagedFiles.length === 0) return;
+    const files = [...stagedFiles];
+    setStagedFiles([]);
+    setUploadErrors([]);
+    setPage(1); // go to page 1 to see new uploads
+    void uploadBatch(files);
+  }, [stagedFiles, uploadBatch]);
+
   const onDrop = useCallback((accepted: File[]) => {
-    void uploadBatch(accepted);
-  }, [uploadBatch]);
+    stageFiles(accepted);
+  }, [stageFiles]);
 
   const onFolderPick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
-    e.target.value = ''; // reset so picking the same folder twice still fires
-    void uploadBatch(files);
-  }, [uploadBatch]);
+    e.target.value = '';
+    stageFiles(files);
+  }, [stageFiles]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -390,25 +448,126 @@ export function OcrUploadsPage() {
   const totalJobs = listData?.total ?? jobs.length;
   const detail = detailResp?.data;
 
-  // Attach a stable serial number computed from the full total: oldest upload
-  // is #1, newest is #total. The API returns newest-first (DESC by created_at),
-  // so the row at index `i` has serial number `total - i`. This keeps the
-  // numbering consistent as pagination scrolls backwards.
+  // Serial number: oldest upload = #1, newest = #total.
+  // Account for pagination offset: page 1 row 0 = total, page 2 row 0 = total - pageSize, etc.
+  const pageOffset = (page - 1) * JOBS_PER_PAGE;
   const jobsWithSerial = useMemo(
-    () => jobs.map((j, i) => ({ job: j, serial: totalJobs - i })),
-    [jobs, totalJobs],
+    () => jobs.map((j, i) => ({ job: j, serial: totalJobs - pageOffset - i })),
+    [jobs, totalJobs, pageOffset],
   );
 
+  // Compute stats from current page data
+  const stats = useMemo(() => {
+    const all = jobs;
+    return {
+      total: listData?.total ?? all.length,
+      completed: all.filter((j) => j.status === 'completed').length,
+      failed: all.filter((j) => j.status === 'failed').length,
+      processing: all.filter((j) => j.status === 'processing').length,
+      pending: all.filter((j) => j.status === 'pending').length,
+      totalSize: all.reduce((s, j) => s + j.fileSizeBytes, 0),
+    };
+  }, [jobs, listData]);
+
+  // Unique file types for the filter
+  const fileTypes = useMemo(() => {
+    const types = new Set(jobs.map((j) => {
+      const ext = j.originalName.split('.').pop()?.toLowerCase() ?? '';
+      return ext;
+    }));
+    return [...types].sort();
+  }, [jobs]);
+
+  // Client-side search + file type filter
   const filteredJobs = useMemo(() => {
-    if (statusFilter === 'all') return jobsWithSerial;
-    if (statusFilter === 'active') {
-      return jobsWithSerial.filter(({ job }) => ACTIVE_STATUSES.includes(job.status));
+    let items = jobsWithSerial;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      items = items.filter(({ job }) => job.originalName.toLowerCase().includes(q));
     }
-    return jobsWithSerial.filter(({ job }) => job.status === statusFilter);
-  }, [jobsWithSerial, statusFilter]);
+    if (fileTypeFilter) {
+      items = items.filter(({ job }) => job.originalName.toLowerCase().endsWith(`.${fileTypeFilter}`));
+    }
+    return items;
+  }, [jobsWithSerial, searchQuery, fileTypeFilter]);
 
   return (
     <div className="flex h-full overflow-hidden">
+      {/* Left sidebar — filters */}
+      <div className="w-52 shrink-0 border-r border-neutral-200 bg-white overflow-y-auto hidden lg:block">
+        <div className="p-4">
+          <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-3">Filters</h2>
+
+          {/* File type filter */}
+          <div className="mb-4">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">File Type</label>
+            <select
+              value={fileTypeFilter}
+              onChange={(e) => setFileTypeFilter(e.target.value)}
+              className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="">All types ({fileTypes.length})</option>
+              {fileTypes.map((t) => (
+                <option key={t} value={t}>.{t}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Stats */}
+          <div className="mb-4">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-2 block">Overview</label>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between px-2 py-1.5 bg-neutral-50 rounded">
+                <span className="text-xs text-neutral-600">Total Jobs</span>
+                <span className="text-xs font-semibold text-neutral-900 tabular-nums">{stats.total}</span>
+              </div>
+              <div className="flex items-center justify-between px-2 py-1.5 bg-success-50 rounded">
+                <span className="text-xs text-success-700">Completed</span>
+                <span className="text-xs font-semibold text-success-800 tabular-nums">{stats.completed}</span>
+              </div>
+              <div className="flex items-center justify-between px-2 py-1.5 bg-blue-50 rounded">
+                <span className="text-xs text-blue-700">Processing</span>
+                <span className="text-xs font-semibold text-blue-800 tabular-nums">{stats.processing}</span>
+              </div>
+              <div className="flex items-center justify-between px-2 py-1.5 bg-neutral-50 rounded">
+                <span className="text-xs text-neutral-600">Pending</span>
+                <span className="text-xs font-semibold text-neutral-800 tabular-nums">{stats.pending}</span>
+              </div>
+              {stats.failed > 0 && (
+                <div className="flex items-center justify-between px-2 py-1.5 bg-danger-50 rounded">
+                  <span className="text-xs text-danger-700">Failed</span>
+                  <span className="text-xs font-semibold text-danger-800 tabular-nums">{stats.failed}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between px-2 py-1.5 bg-neutral-50 rounded mt-2">
+                <span className="text-xs text-neutral-500">Total Size</span>
+                <span className="text-xs font-medium text-neutral-700 tabular-nums">{fmtSize(stats.totalSize)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Export */}
+          <button
+            onClick={() => exportJobsCsv(jobs)}
+            disabled={jobs.length === 0}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 bg-white border border-neutral-200 rounded-md hover:bg-neutral-50 disabled:opacity-40 transition-colors"
+          >
+            <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+            Export CSV
+          </button>
+
+          {(fileTypeFilter || searchQuery) && (
+            <button
+              onClick={() => { setFileTypeFilter(''); setSearchQuery(''); }}
+              className="w-full flex items-center justify-center gap-1 px-2 py-1.5 mt-2 text-[10px] font-medium text-danger-600 bg-danger-50 rounded hover:bg-danger-100 transition-colors"
+            >
+              <XMarkIcon className="w-3 h-3" />
+              Clear filters
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Main panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="px-6 py-4 border-b border-neutral-200 bg-white shrink-0 flex items-center justify-between">
@@ -418,12 +577,44 @@ export function OcrUploadsPage() {
               Upload documents for automated text and data extraction. Processing happens in the background.
             </p>
           </div>
-          <div className="hidden md:flex items-center gap-3 text-[11px] text-neutral-500">
-            <span className="inline-flex items-center gap-1">
+          <div className="flex items-center gap-3">
+            {/* View toggle */}
+            <div className="hidden md:flex rounded-md border border-neutral-200 overflow-hidden">
+              <button
+                onClick={() => setViewMode('list')}
+                className={clsx(
+                  'flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition-colors',
+                  viewMode === 'list' ? 'bg-brand-50 text-brand-700' : 'bg-white text-neutral-500 hover:bg-neutral-50',
+                )}
+              >
+                <DocumentTextIcon className="w-3.5 h-3.5" />
+                List
+              </button>
+              <button
+                onClick={() => setViewMode('compact')}
+                className={clsx(
+                  'flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition-colors border-l border-neutral-200',
+                  viewMode === 'compact' ? 'bg-brand-50 text-brand-700' : 'bg-white text-neutral-500 hover:bg-neutral-50',
+                )}
+              >
+                <TableCellsIcon className="w-3.5 h-3.5" />
+                Compact
+              </button>
+            </div>
+            <span className="hidden md:inline-flex items-center gap-1 text-[11px] text-neutral-500">
               <span className="w-1.5 h-1.5 rounded-full bg-success-500" />
               API connected
             </span>
           </div>
+        </div>
+
+        {/* Stats strip — mobile (hidden on lg where sidebar shows) */}
+        <div className="lg:hidden px-6 py-3 border-b border-neutral-100 bg-neutral-50 flex items-center gap-4 overflow-x-auto shrink-0">
+          <StatPill icon={<DocumentTextIcon className="w-3.5 h-3.5" />} label="Total" value={stats.total} />
+          <StatPill icon={<CheckCircleIcon className="w-3.5 h-3.5 text-success-600" />} label="Done" value={stats.completed} />
+          <StatPill icon={<CpuChipIcon className="w-3.5 h-3.5 text-blue-600" />} label="Processing" value={stats.processing} />
+          <StatPill icon={<ClockIcon className="w-3.5 h-3.5 text-neutral-500" />} label="Pending" value={stats.pending} />
+          {stats.failed > 0 && <StatPill icon={<ExclamationCircleIcon className="w-3.5 h-3.5 text-danger-600" />} label="Failed" value={stats.failed} />}
         </div>
 
         {/* Dropzone */}
@@ -482,6 +673,52 @@ export function OcrUploadsPage() {
             />
           </div>
 
+          {/* Staged files preview — shows files before upload */}
+          {stagedFiles.length > 0 && !batch && (
+            <div className="mt-3 bg-white border border-neutral-200 rounded-lg overflow-hidden shadow-sm">
+              <div className="px-4 py-3 border-b border-neutral-100 flex items-center justify-between">
+                <span className="text-base font-semibold text-neutral-900">
+                  {stagedFiles.length} file{stagedFiles.length === 1 ? '' : 's'} selected
+                  <span className="ml-2 text-sm text-neutral-400 font-normal">
+                    {fmtSize(stagedFiles.reduce((s, f) => s + f.size, 0))} total
+                  </span>
+                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={clearStagedFiles}
+                    className="px-4 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 rounded-md border border-neutral-300 transition-colors"
+                  >
+                    Clear All
+                  </button>
+                  <button
+                    onClick={uploadAllStaged}
+                    className="px-5 py-2 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md transition-colors shadow-sm"
+                  >
+                    Upload All
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-52 overflow-y-auto divide-y divide-neutral-50">
+                {stagedFiles.map((f, i) => (
+                  <div key={`${f.name}-${i}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-neutral-50">
+                    <FileIcon filename={f.name} status="pending" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-neutral-800 truncate font-medium">{(f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name}</p>
+                      <span className="text-xs text-neutral-400">{fmtSize(f.size)}</span>
+                    </div>
+                    <button
+                      onClick={() => removeStagedFile(i)}
+                      className="p-1.5 text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded transition-colors"
+                      title="Remove file"
+                    >
+                      <XMarkIcon className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {batch && <UploadProgressCard batch={batch} onAbort={abortBatch} />}
 
           {uploadErrors.length > 0 && (
@@ -508,47 +745,72 @@ export function OcrUploadsPage() {
 
         {/* Jobs list */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
-          <div className="mb-3 flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-neutral-900">Jobs</h2>
-              <span className="text-[10px] text-neutral-400 tabular-nums">
-                {filteredJobs.length === jobs.length
-                  ? `${jobs.length} total`
-                  : `${filteredJobs.length} of ${jobs.length}`}
-              </span>
+          <div className="mb-4 space-y-3">
+            {/* Title + count */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold text-neutral-900">Jobs</h2>
+                <span className="text-sm text-neutral-400 tabular-nums">
+                  {listData?.total ?? jobs.length} total
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-1">
-              <FilterChip
-                active={statusFilter === 'all'}
-                onClick={() => setStatusFilter('all')}
-                count={jobs.length}
-              >
-                All
-              </FilterChip>
-              <FilterChip
-                active={statusFilter === 'active'}
-                onClick={() => setStatusFilter('active')}
-                count={jobs.filter((j) => ACTIVE_STATUSES.includes(j.status)).length}
-                variant="active"
-              >
-                Active
-              </FilterChip>
-              <FilterChip
-                active={statusFilter === 'completed'}
-                onClick={() => setStatusFilter('completed')}
-                count={jobs.filter((j) => j.status === 'completed').length}
-                variant="success"
-              >
-                Completed
-              </FilterChip>
-              <FilterChip
-                active={statusFilter === 'failed'}
-                onClick={() => setStatusFilter('failed')}
-                count={jobs.filter((j) => j.status === 'failed').length}
-                variant="danger"
-              >
-                Failed
-              </FilterChip>
+
+            {/* Search + status filters */}
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Search bar */}
+              <div className="relative flex-1 min-w-[200px] max-w-sm">
+                <input
+                  type="text"
+                  placeholder="Search by filename..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-3 pr-8 py-2 text-sm border border-neutral-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-neutral-400"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-neutral-400 hover:text-neutral-600"
+                  >
+                    <XMarkIcon className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Status filter chips — count shows for the active filter only */}
+              <div className="flex items-center gap-1.5">
+                <FilterChip
+                  active={statusFilter === 'all'}
+                  onClick={() => { setStatusFilter('all'); setPage(1); }}
+                  count={statusFilter === 'all' ? (listData?.total ?? 0) : undefined}
+                >
+                  All
+                </FilterChip>
+                <FilterChip
+                  active={statusFilter === 'active'}
+                  onClick={() => { setStatusFilter('active'); setPage(1); }}
+                  count={statusFilter === 'active' ? (listData?.total ?? 0) : undefined}
+                  variant="active"
+                >
+                  Active
+                </FilterChip>
+                <FilterChip
+                  active={statusFilter === 'completed'}
+                  onClick={() => { setStatusFilter('completed'); setPage(1); }}
+                  count={statusFilter === 'completed' ? (listData?.total ?? 0) : undefined}
+                  variant="success"
+                >
+                  Completed
+                </FilterChip>
+                <FilterChip
+                  active={statusFilter === 'failed'}
+                  onClick={() => { setStatusFilter('failed'); setPage(1); }}
+                  count={statusFilter === 'failed' ? (listData?.total ?? 0) : undefined}
+                  variant="danger"
+                >
+                  Failed
+                </FilterChip>
+              </div>
             </div>
           </div>
 
@@ -569,16 +831,44 @@ export function OcrUploadsPage() {
               No jobs match this filter.
             </div>
           ) : (
-            <div className="bg-white border border-neutral-200 rounded-lg divide-y divide-neutral-100 overflow-hidden">
-              {filteredJobs.map(({ job, serial }) => (
+            <div className={clsx(
+              'bg-white border border-neutral-200 rounded-lg overflow-hidden',
+              viewMode === 'list' ? 'divide-y divide-neutral-100' : '',
+            )}>
+              {viewMode === 'compact' ? (
+                /* ── Compact grid view ── */
+                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-px bg-neutral-100">
+                  {filteredJobs.map(({ job, serial }) => (
+                    <button
+                      key={job.id}
+                      onClick={() => setSelectedId(job.id)}
+                      className={clsx(
+                        'bg-white p-3 text-left hover:bg-neutral-50 transition-colors',
+                        selectedId === job.id && 'bg-brand-50 hover:bg-brand-50',
+                      )}
+                    >
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <FileIcon filename={job.originalName} status={job.status} />
+                        <span className="text-[10px] text-neutral-400 tabular-nums">#{serial}</span>
+                      </div>
+                      <p className="text-xs text-neutral-800 truncate font-medium">{job.originalName}</p>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <StatusBadge status={job.status} />
+                        <span className="text-[10px] text-neutral-400">{fmtSize(job.fileSizeBytes)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                /* ── List view ── */
+                filteredJobs.map(({ job, serial }) => (
                 <div
                   key={job.id}
                   className={clsx(
-                    'flex items-center gap-3 px-4 py-3 hover:bg-neutral-50 transition-colors',
+                    'flex items-center gap-3 px-4 py-3 hover:bg-neutral-50 transition-colors border-b border-neutral-100 last:border-b-0',
                     selectedId === job.id && 'bg-brand-50/60 hover:bg-brand-50/60',
                   )}
                 >
-                  {/* Serial number — oldest upload = #1, newest = #total. */}
                   <span className="shrink-0 w-8 text-right text-[11px] font-medium text-neutral-400 tabular-nums">
                     {serial}
                   </span>
@@ -652,7 +942,33 @@ export function OcrUploadsPage() {
                     )}
                   </div>
                 </div>
-              ))}
+              ))
+              )}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {(listData?.totalPages ?? 1) > 1 && (
+            <div className="mt-5 flex items-center justify-between">
+              <span className="text-sm text-neutral-600">
+                Page <span className="font-semibold">{page}</span> of <span className="font-semibold">{listData?.totalPages ?? 1}</span> · {listData?.total ?? 0} jobs total
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className="px-4 py-2 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => setPage((p) => Math.min(listData?.totalPages ?? 1, p + 1))}
+                  disabled={page >= (listData?.totalPages ?? 1)}
+                  className="px-4 py-2 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  Next
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -806,6 +1122,16 @@ export function OcrUploadsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function StatPill({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-md border border-neutral-200 shrink-0">
+      {icon}
+      <span className="text-xs text-neutral-500">{label}</span>
+      <span className="text-xs font-semibold text-neutral-900 tabular-nums">{value}</span>
     </div>
   );
 }
@@ -1015,7 +1341,7 @@ function FilterChip({
   variant = 'neutral',
 }: {
   active: boolean;
-  count: number;
+  count?: number | undefined;
   onClick: () => void;
   children: React.ReactNode;
   variant?: 'neutral' | 'active' | 'success' | 'danger';
@@ -1037,12 +1363,14 @@ function FilterChip({
       )}
     >
       <span>{children}</span>
-      <span className={clsx(
-        'tabular-nums text-[10px] px-1 rounded',
-        active ? 'bg-white/20' : 'bg-neutral-100 text-neutral-500',
-      )}>
-        {count}
-      </span>
+      {count != null && (
+        <span className={clsx(
+          'tabular-nums text-[10px] px-1 rounded',
+          active ? 'bg-white/20' : 'bg-neutral-100 text-neutral-500',
+        )}>
+          {count}
+        </span>
+      )}
     </button>
   );
 }
