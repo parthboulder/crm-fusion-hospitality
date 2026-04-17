@@ -527,50 +527,87 @@ export async function ocrRoutes(app: FastifyInstance) {
   });
 
   // ─── GET /jobs/facets ────────────────────────────────────────────────────
-  // Returns the unique values for the four classification dropdowns. The UI
-  // calls this once to populate dropdowns; doing it client-side would only
-  // see the current page of jobs, which gives wrong filter options when
-  // there are >limit total jobs.
-  app.get('/jobs/facets', async (_req, reply) => {
-    const supabase = supabaseAdmin();
-    const { data, error } = await supabase
-      .from('ocr_jobs')
-      .select('property, date_folder, report_type, report_category')
-      .limit(5000); // cap — huge tables don't need every value
-
-    if (error) {
-      // Migration not applied yet — return empty facets so the UI still loads.
-      if (/column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(error.message)) {
-        return reply.send({ success: true, data: { properties: [], dates: [], reportTypes: [], categories: [] } });
-      }
-      app.log.error({ error }, 'ocr_jobs_facets_failed');
-      return reply.code(500).send({
+  // Returns the unique values for the four classification dropdowns. Each
+  // facet is scoped by the OTHER active filters, so the dropdowns only
+  // surface options that would yield at least one result. A "property"
+  // dropdown reflects every distinct property under the current date +
+  // reportType + category filters — but not the current property filter
+  // (otherwise it would collapse to one option).
+  app.get('/jobs/facets', async (req, reply) => {
+    const parsed = z
+      .object({
+        property: z.string().min(1).max(120).optional(),
+        dateFolder: z.string().min(1).max(20).optional(),
+        reportType: z.string().min(1).max(120).optional(),
+        category: z.string().min(1).max(120).optional(),
+        search: z.string().min(1).max(200).optional(),
+      })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({
         success: false,
-        error: { code: 'DB_ERROR', message: error.message },
+        error: { code: 'INVALID_QUERY', message: 'Invalid query parameters.' },
       });
     }
+    const q = parsed.data;
 
-    const props = new Set<string>();
-    const dates = new Set<string>();
-    const types = new Set<string>();
-    const cats  = new Set<string>();
-    for (const r of data ?? []) {
-      const row = r as { property: string | null; date_folder: string | null; report_type: string | null; report_category: string | null };
-      if (row.property) props.add(row.property);
-      if (row.date_folder) dates.add(row.date_folder);
-      if (row.report_type) types.add(row.report_type);
-      if (row.report_category) cats.add(row.report_category);
+    const supabase = supabaseAdmin();
+
+    type FacetKey = 'property' | 'dateFolder' | 'reportType' | 'category';
+    const fetchFacet = async (self: FacetKey): Promise<string[]> => {
+      let builder = supabase
+        .from('ocr_jobs')
+        .select('property, date_folder, report_type, report_category')
+        .limit(5000);
+      if (self !== 'property'   && q.property)   builder = builder.eq('property', q.property);
+      if (self !== 'dateFolder' && q.dateFolder) builder = builder.eq('date_folder', q.dateFolder);
+      if (self !== 'reportType' && q.reportType) builder = builder.eq('report_type', q.reportType);
+      if (self !== 'category'   && q.category)   builder = builder.eq('report_category', q.category);
+      if (q.search) builder = builder.ilike('original_name', `%${q.search}%`);
+
+      const { data, error } = await builder;
+      if (error) throw error;
+      const col: Record<FacetKey, keyof { property: string; date_folder: string; report_type: string; report_category: string }> = {
+        property:   'property',
+        dateFolder: 'date_folder',
+        reportType: 'report_type',
+        category:   'report_category',
+      };
+      const set = new Set<string>();
+      for (const r of data ?? []) {
+        const v = (r as Record<string, string | null>)[col[self]];
+        if (v) set.add(v);
+      }
+      return [...set];
+    };
+
+    try {
+      const [properties, dates, reportTypes, categories] = await Promise.all([
+        fetchFacet('property'),
+        fetchFacet('dateFolder'),
+        fetchFacet('reportType'),
+        fetchFacet('category'),
+      ]);
+      return reply.send({
+        success: true,
+        data: {
+          properties:  properties.sort(),
+          dates:       dates.sort().reverse(), // newest first
+          reportTypes: reportTypes.sort(),
+          categories:  categories.sort(),
+        },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(msg)) {
+        return reply.send({ success: true, data: { properties: [], dates: [], reportTypes: [], categories: [] } });
+      }
+      app.log.error({ err }, 'ocr_jobs_facets_failed');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: msg },
+      });
     }
-
-    return reply.send({
-      success: true,
-      data: {
-        properties:  [...props].sort(),
-        dates:       [...dates].sort().reverse(), // newest first
-        reportTypes: [...types].sort(),
-        categories:  [...cats].sort(),
-      },
-    });
   });
 
   // ─── GET /jobs/:id ────────────────────────────────────────────────────────
@@ -1194,21 +1231,57 @@ export async function ocrRoutes(app: FastifyInstance) {
   // ─── GET /jobs/storage-stats ─────────────────────────────────────────────
   // Surfaces how much DB space ocr_jobs is using + snapshot info, so the
   // Settings page can show the operator what to clean.
-  app.get('/jobs/storage-stats', async (_req, reply) => {
+  app.get('/jobs/storage-stats', async (req, reply) => {
+    const parsed = z
+      .object({
+        property: z.string().min(1).max(120).optional(),
+        dateFolder: z.string().min(1).max(20).optional(),
+        reportType: z.string().min(1).max(120).optional(),
+        category: z.string().min(1).max(120).optional(),
+        search: z.string().min(1).max(200).optional(),
+      })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: 'INVALID_QUERY', message: 'Invalid query parameters.' },
+      });
+    }
+    const q = parsed.data;
+
     const supabase = supabaseAdmin();
     const counts: Record<string, number> = {
       pending: 0, processing: 0, completed: 0, failed: 0,
     };
     let totalBytes = 0;
 
+    // Apply same classification filters as /jobs so sidebar Overview matches
+    // the filtered list. Classification columns may not exist yet (pre-mig
+    // 014) — fall back to unfiltered scan in that case.
+    const applyFilters = (b: ReturnType<typeof supabase.from>) => {
+      let x = b.select('status, file_size_bytes');
+      if (q.property)   x = x.eq('property', q.property);
+      if (q.dateFolder) x = x.eq('date_folder', q.dateFolder);
+      if (q.reportType) x = x.eq('report_type', q.reportType);
+      if (q.category)   x = x.eq('report_category', q.category);
+      if (q.search)     x = x.ilike('original_name', `%${q.search}%`);
+      return x;
+    };
+
     const PAGE = 1000;
     let offset = 0;
+    let classificationColumnsMissing = false;
     while (true) {
-      const { data, error } = await supabase
-        .from('ocr_jobs')
-        .select('status, file_size_bytes')
-        .range(offset, offset + PAGE - 1);
+      const builder = classificationColumnsMissing
+        ? supabase.from('ocr_jobs').select('status, file_size_bytes')
+        : applyFilters(supabase.from('ocr_jobs'));
+      const { data, error } = await builder.range(offset, offset + PAGE - 1);
       if (error) {
+        if (!classificationColumnsMissing && /column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(error.message)) {
+          classificationColumnsMissing = true;
+          offset = 0;
+          continue;
+        }
         return reply.code(500).send({
           success: false,
           error: { code: 'DB_ERROR', message: error.message },

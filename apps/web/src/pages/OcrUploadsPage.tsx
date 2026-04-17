@@ -4,7 +4,7 @@
  */
 
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import { clsx } from 'clsx';
 import {
@@ -242,11 +242,10 @@ export function OcrUploadsPage() {
   const abortBatch = useUploadStore((s) => s.abortBatch);
   const setUploadErrors = useUploadStore((s) => s.setErrors);
 
-  // Build query params for the API
-  const queryParams = (() => {
-    const params = new URLSearchParams({ limit: String(JOBS_PER_PAGE), page: String(page) });
-    if (statusFilter !== 'all' && statusFilter !== 'active') params.set('status', statusFilter);
-    if (statusFilter === 'active') params.set('status', 'pending'); // active = pending + processing
+  // Classification-only params — reused by /jobs, /facets, /storage-stats.
+  // Status is included only for /jobs; facets + stats are status-agnostic.
+  const classificationParams = (() => {
+    const params = new URLSearchParams();
     if (propertyFilter)   params.set('property', propertyFilter);
     if (dateFilter)       params.set('dateFolder', dateFilter);
     if (reportTypeFilter) params.set('reportType', reportTypeFilter);
@@ -255,9 +254,19 @@ export function OcrUploadsPage() {
     return params.toString();
   })();
 
+  const queryParams = (() => {
+    const params = new URLSearchParams(classificationParams);
+    params.set('limit', String(JOBS_PER_PAGE));
+    params.set('page', String(page));
+    if (statusFilter !== 'all' && statusFilter !== 'active') params.set('status', statusFilter);
+    if (statusFilter === 'active') params.set('status', 'pending'); // active = pending + processing
+    return params.toString();
+  })();
+
   const { data: listData, isLoading } = useQuery<{ data: OcrJob[]; total: number; totalPages: number }>({
     queryKey: ['ocr-jobs', page, statusFilter, propertyFilter, dateFilter, reportTypeFilter, categoryFilter, searchQuery],
     queryFn: () => api.get(`/ocr/jobs?${queryParams}`),
+    placeholderData: keepPreviousData,
     refetchInterval: (q) => {
       const list = q.state.data?.data ?? [];
       return list.some((j) => ACTIVE_STATUSES.includes(j.status)) ? 3000 : 30_000;
@@ -268,9 +277,13 @@ export function OcrUploadsPage() {
   // Facets — populated dropdown options across the WHOLE dataset (not just
   // the current page). Refetched alongside the list so newly classified
   // jobs appear in the dropdowns within ~30s.
+  // Facets are scoped by the OTHER active filters so the dropdowns never
+  // suggest an option that would yield zero rows. Same query string shape
+  // as /storage-stats (property/date/reportType/category/search).
   const { data: facetsResp } = useQuery<{ data: OcrFacets }>({
-    queryKey: ['ocr-jobs-facets'],
-    queryFn: () => api.get('/ocr/jobs/facets'),
+    queryKey: ['ocr-jobs-facets', propertyFilter, dateFilter, reportTypeFilter, categoryFilter, searchQuery],
+    queryFn: () => api.get(`/ocr/jobs/facets${classificationParams ? `?${classificationParams}` : ''}`),
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
   });
   const facets: OcrFacets = facetsResp?.data ?? { properties: [], dates: [], reportTypes: [], categories: [] };
@@ -310,11 +323,17 @@ export function OcrUploadsPage() {
     refetchIntervalInBackground: false,
   });
 
+  const invalidateJobsAndSidebars = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
+    qc.invalidateQueries({ queryKey: ['ocr-jobs-facets'] });
+    qc.invalidateQueries({ queryKey: ['ocr-storage-stats'] });
+  }, [qc]);
+
   const cancelMutation = useMutation({
     mutationFn: (jobId: string) =>
       api.post<{ success: boolean }>(`/ocr/jobs/${jobId}/cancel`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
+      invalidateJobsAndSidebars();
       if (selectedId) qc.invalidateQueries({ queryKey: ['ocr-job', selectedId] });
     },
   });
@@ -323,7 +342,7 @@ export function OcrUploadsPage() {
     mutationFn: (jobId: string) =>
       api.delete<{ success: boolean }>(`/ocr/jobs/${jobId}`),
     onSuccess: (_data, jobId) => {
-      qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
+      invalidateJobsAndSidebars();
       if (selectedId === jobId) setSelectedId(null);
     },
   });
@@ -332,7 +351,7 @@ export function OcrUploadsPage() {
     mutationFn: (jobId: string) =>
       api.post<{ success: boolean }>(`/ocr/jobs/${jobId}/retry`),
     onSuccess: (_data, jobId) => {
-      qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
+      invalidateJobsAndSidebars();
       qc.invalidateQueries({ queryKey: ['ocr-job', jobId] });
     },
   });
@@ -350,10 +369,8 @@ export function OcrUploadsPage() {
   // navigation. The store handles concurrency, abort, and auto-clear.
   const uploadBatch = useCallback(
     (rawFiles: File[]) =>
-      startBatchInStore(rawFiles, isAcceptedFile, () =>
-        qc.invalidateQueries({ queryKey: ['ocr-jobs'] }),
-      ),
-    [qc, startBatchInStore],
+      startBatchInStore(rawFiles, isAcceptedFile, invalidateJobsAndSidebars),
+    [invalidateJobsAndSidebars, startBatchInStore],
   );
 
   // Stage files for preview instead of uploading immediately.
@@ -418,9 +435,10 @@ export function OcrUploadsPage() {
     [jobs, totalJobs, pageOffset],
   );
 
-  // Stats come from the server-wide /storage-stats endpoint, not the current
-  // page. Otherwise "Completed: 20" would just count the visible page slice
-  // while total said 294, which looked broken.
+  // Stats come from the server-wide /storage-stats endpoint, scoped by the
+  // same classification filters as the list so the Overview counts match
+  // what the user filtered to. Status is intentionally NOT a filter here —
+  // Overview is the per-status breakdown.
   const statsQuery = useQuery<{
     success: boolean;
     data: {
@@ -429,8 +447,9 @@ export function OcrUploadsPage() {
       statusCounts: Record<string, number>;
     };
   }>({
-    queryKey: ['ocr-storage-stats'],
-    queryFn: () => api.get('/ocr/jobs/storage-stats'),
+    queryKey: ['ocr-storage-stats', propertyFilter, dateFilter, reportTypeFilter, categoryFilter, searchQuery],
+    queryFn: () => api.get(`/ocr/jobs/storage-stats${classificationParams ? `?${classificationParams}` : ''}`),
+    placeholderData: keepPreviousData,
     staleTime: 15_000,
   });
 
