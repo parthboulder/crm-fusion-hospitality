@@ -52,9 +52,6 @@ const schema = z.object({
   RATE_LIMIT_AUTH_MAX: z.coerce.number().default(10),
   RATE_LIMIT_API_MAX: z.coerce.number().default(300),
   SESSION_MAX_CONCURRENT: z.coerce.number().default(5),
-  // MFA disabled by default — set to a comma-separated role list (e.g.
-  // 'super_admin,finance,corporate') to require MFA for those roles.
-  MFA_REQUIRED_ROLES: z.string().default(''),
 });
 
 const parsed = schema.safeParse(process.env);

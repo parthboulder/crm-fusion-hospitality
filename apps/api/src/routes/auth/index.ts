@@ -1,21 +1,16 @@
 /**
- * Auth routes — login, logout, MFA, session management.
+ * Auth routes — login, logout, session management.
  */
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import * as argon2 from 'argon2';
-import { authenticator } from 'otplib';
-import * as QRCode from 'qrcode';
 import { supabaseAdmin } from '../../lib/supabase.js';
 import { env } from '../../config/env.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
-  // Min 6 to allow short admin passwords during initial setup. Tighten to 8+
-  // before going wider — short passwords are not safe for production users.
   password: z.string().min(6),
-  mfaCode: z.string().optional(),
 });
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
@@ -90,39 +85,6 @@ export async function authRoutes(app: FastifyInstance) {
         });
       }
 
-      // MFA enforcement for sensitive roles.
-      const mfaRequiredRoles = env.MFA_REQUIRED_ROLES.split(',');
-      if (user.mfa_enabled || mfaRequiredRoles.includes(user.roles.name)) {
-        if (!user.mfa_enabled) {
-          // MFA required but not set up — force setup flow.
-          return reply.code(403).send({
-            success: false,
-            error: { code: 'MFA_SETUP_REQUIRED', message: 'MFA setup required for your role.' },
-          });
-        }
-
-        if (!body.mfaCode) {
-          return reply.code(403).send({
-            success: false,
-            error: { code: 'MFA_CODE_REQUIRED', message: 'MFA code required.' },
-          });
-        }
-
-        // Retrieve stored TOTP secret (stored in metadata JSONB column).
-        const totpSecret = (user.metadata as Record<string, unknown> | null)?.totp_secret as string | undefined;
-        if (!totpSecret || !authenticator.check(body.mfaCode, totpSecret)) {
-          await app.audit(req, {
-            action: 'auth.mfa.failed',
-            resourceType: 'auth',
-            resourceId: user.id,
-            result: 'failure',
-          });
-          return reply.code(401).send({
-            success: false,
-            error: { code: 'INVALID_MFA_CODE', message: 'Invalid MFA code.' },
-          });
-        }
-      }
 
       // Enforce concurrent session limit.
       const { count: activeSessions, error: countError } = await supabase
@@ -485,91 +447,6 @@ export async function authRoutes(app: FastifyInstance) {
   // ─── GET /me ────────────────────────────────────────────────────────────────
   app.get('/me', { preHandler: [app.verifyAuth] }, async (req, reply) => {
     return reply.send({ success: true, data: { user: req.authUser } });
-  });
-
-  // ─── POST /mfa/setup ────────────────────────────────────────────────────────
-  app.post('/mfa/setup', { preHandler: [app.verifyAuth] }, async (req, reply) => {
-    const supabase = supabaseAdmin();
-    const secret = authenticator.generateSecret();
-    const otpauth = authenticator.keyuri(req.authUser.email, 'Fusion Hospitality', secret);
-    const qrDataUrl = await QRCode.toDataURL(otpauth);
-
-    // Store secret temporarily (pending confirmation).
-    // Fetch current metadata, merge, and update via Supabase ORM.
-    const { data: current } = await supabase
-      .from('user_profiles')
-      .select('metadata')
-      .eq('id', req.authUser.id)
-      .single();
-
-    const updatedMetadata = {
-      ...(current?.metadata ?? {}),
-      pending_totp_secret: secret,
-    };
-
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ metadata: updatedMetadata })
-      .eq('id', req.authUser.id);
-
-    if (updateError) {
-      req.log.error({ err: updateError }, 'Failed to store pending TOTP secret');
-      return reply.code(500).send({
-        success: false,
-        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
-      });
-    }
-
-    return reply.send({ success: true, data: { qrDataUrl } });
-  });
-
-  // ─── POST /mfa/confirm ──────────────────────────────────────────────────────
-  app.post('/mfa/confirm', { preHandler: [app.verifyAuth] }, async (req, reply) => {
-    const supabase = supabaseAdmin();
-    const { code } = z.object({ code: z.string().length(6) }).parse(req.body);
-
-    const { data: userRow, error: fetchError } = await supabase
-      .from('user_profiles')
-      .select('metadata')
-      .eq('id', req.authUser.id)
-      .single();
-
-    if (fetchError) {
-      req.log.error({ err: fetchError }, 'Failed to fetch user metadata');
-      return reply.code(500).send({
-        success: false,
-        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
-      });
-    }
-
-    const pending = userRow?.metadata?.['pending_totp_secret'];
-    if (!pending || !authenticator.check(code, pending)) {
-      return reply.code(400).send({
-        success: false,
-        error: { code: 'INVALID_CODE', message: 'Invalid verification code.' },
-      });
-    }
-
-    // Move pending secret to confirmed, enable MFA.
-    const currentMetadata = userRow.metadata ?? {};
-    const { pending_totp_secret: _, ...restMetadata } = currentMetadata as Record<string, unknown>;
-    const updatedMetadata = { ...restMetadata, totp_secret: pending };
-
-    const { error: updateError } = await supabase
-      .from('user_profiles')
-      .update({ mfa_enabled: true, metadata: updatedMetadata })
-      .eq('id', req.authUser.id);
-
-    if (updateError) {
-      req.log.error({ err: updateError }, 'Failed to enable MFA');
-      return reply.code(500).send({
-        success: false,
-        error: { code: 'INTERNAL_ERROR', message: 'Internal server error.' },
-      });
-    }
-
-    await app.audit(req, { action: 'auth.mfa.enabled', resourceType: 'auth' });
-    return reply.send({ success: true, data: { message: 'MFA enabled.' } });
   });
 
   // ─── GET /sessions ──────────────────────────────────────────────────────────

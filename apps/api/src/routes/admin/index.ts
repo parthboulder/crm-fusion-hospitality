@@ -55,7 +55,6 @@ export async function adminRoutes(app: FastifyInstance) {
         email: u.email,
         fullName: u.full_name,
         isActive: u.is_active,
-        mfaEnabled: u.mfa_enabled,
         lastLoginAt: u.last_login_at,
         role: r ? { name: r.name ?? '', displayName: r.display_name ?? r.name ?? '' } : null,
         _count: { sessions: sessionCounts.get(u.id as string) ?? 0 },

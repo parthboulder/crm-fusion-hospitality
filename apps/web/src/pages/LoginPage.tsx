@@ -1,5 +1,5 @@
 /**
- * Login page — email/password + optional MFA code.
+ * Login page — email/password.
  */
 
 import { useState } from 'react';
@@ -33,8 +33,6 @@ export function LoginPage() {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [mfaCode, setMfaCode] = useState('');
-  const [showMfa, setShowMfa] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
@@ -66,12 +64,7 @@ export function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await api.post<LoginResponse>('/auth/login', {
-        email,
-        password,
-        ...(showMfa && mfaCode ? { mfaCode } : {}),
-      });
-
+      const res = await api.post<LoginResponse>('/auth/login', { email, password });
       const me = await api.get<MeResponse>('/auth/me');
 
       setUser({
@@ -82,14 +75,7 @@ export function LoginPage() {
       navigate('/dashboard');
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.code === 'MFA_CODE_REQUIRED') {
-          setShowMfa(true);
-          setError('Enter your MFA code to continue.');
-        } else if (err.code === 'MFA_SETUP_REQUIRED') {
-          setError('MFA setup is required for your role. Contact your administrator.');
-        } else {
-          setError(err.message);
-        }
+        setError(err.message);
       } else {
         setError('An unexpected error occurred.');
       }
@@ -179,26 +165,6 @@ export function LoginPage() {
                            focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
               />
             </div>
-
-            {showMfa && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="mfa">
-                  Authenticator Code
-                </label>
-                <input
-                  id="mfa"
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  value={mfaCode}
-                  onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ''))}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg
-                             focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
-                             tracking-widest text-center font-mono"
-                  placeholder="000000"
-                />
-              </div>
-            )}
 
             <button
               type="submit"

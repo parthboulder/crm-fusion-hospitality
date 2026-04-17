@@ -18,7 +18,6 @@ interface User {
   fullName: string;
   email: string;
   isActive: boolean;
-  mfaEnabled: boolean;
   lastLoginAt: string | null;
   role: { name: string; displayName: string };
   _count: { sessions: number };
@@ -45,7 +44,6 @@ const ACTION_LABELS: Record<string, string> = {
   'auth.oauth.success': 'Microsoft sign-in',
   'auth.oauth.failed': 'Microsoft sign-in failed',
   'auth.oauth.autoprovisioned': 'Account auto-created',
-  'auth.mfa.failed': 'MFA failed',
 };
 
 export function AdminPage() {
@@ -116,7 +114,7 @@ function UsersTab({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
       <table className="w-full text-sm">
         <thead className="bg-slate-25 border-b border-gray-100">
           <tr>
-            {['User', 'Role', 'MFA', 'Last Login', 'Active Sessions', 'Status', 'Actions'].map((h) => (
+            {['User', 'Role', 'Last Login', 'Active Sessions', 'Status', 'Actions'].map((h) => (
               <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
             ))}
           </tr>
@@ -124,7 +122,7 @@ function UsersTab({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
         <tbody className="divide-y divide-gray-50">
           {isLoading
             ? Array.from({ length: 5 }).map((_, i) => (
-                <tr key={i}><td colSpan={7} className="px-4 py-3"><div className="h-6 bg-gray-50 rounded animate-pulse" /></td></tr>
+                <tr key={i}><td colSpan={6} className="px-4 py-3"><div className="h-6 bg-gray-50 rounded animate-pulse" /></td></tr>
               ))
             : (data?.data ?? []).map((user) => (
                 <tr key={user.id} className={clsx('hover:bg-slate-25', !user.isActive && 'opacity-50')}>
@@ -133,11 +131,6 @@ function UsersTab({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                     <p className="text-xs text-gray-400">{user.email}</p>
                   </td>
                   <td className="px-4 py-3 capitalize text-gray-600">{user.role?.displayName ?? '—'}</td>
-                  <td className="px-4 py-3">
-                    <span className={clsx('text-xs font-medium', user.mfaEnabled ? 'text-success-600' : 'text-gray-300')}>
-                      {user.mfaEnabled ? '✓ On' : 'Off'}
-                    </span>
-                  </td>
                   <td className="px-4 py-3 text-xs text-gray-400 tabular-nums">{fmtRelative(user.lastLoginAt)}</td>
                   <td className="px-4 py-3 tabular-nums text-gray-600">{user._count?.sessions ?? 0}</td>
                   <td className="px-4 py-3">
