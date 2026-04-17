@@ -13,6 +13,7 @@ import { useLatestDataDate } from '../hooks/useLatestDataDate';
 import { FlashReportTable } from '../components/stoneriver/FlashReportTable';
 import { MultiSelect } from '../components/stoneriver/MultiSelect';
 import { CITIES, REGIONS } from '../constants/stoneriver-properties';
+import { exportTableToPdf } from '../lib/pdf-table-export';
 
 const TODAY = format(new Date(), 'yyyy-MM-dd');
 
@@ -37,29 +38,13 @@ export function FlashReportDashboardPage() {
     try {
       const tableEl = document.getElementById('flash-report-table');
       if (!tableEl) return;
-      const { default: html2canvas } = await import('html2canvas-pro');
-      const { jsPDF } = await import('jspdf');
-
-      const prevOverflow = tableEl.style.overflow;
-      tableEl.style.overflow = 'visible';
-      const canvas = await html2canvas(tableEl, { scale: 2, backgroundColor: '#ffffff', logging: false });
-      tableEl.style.overflow = prevOverflow;
-
-      const imgData = canvas.toDataURL('image/png');
-      const pageW = 297, pageH = 210, margin = 8;
-      const usableW = pageW - margin * 2;
-      const ratio = usableW / canvas.width;
-      const scaledH = canvas.height * ratio;
-
-      const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-      pdf.setFontSize(12);
-      pdf.setFont('helvetica', 'bold');
-      pdf.text('Flash Report', margin, margin + 4);
-      pdf.setFontSize(9);
-      pdf.setFont('helvetica', 'normal');
-      pdf.text(`Report Date: ${displayDate}`, margin, margin + 9);
-      pdf.addImage(imgData, 'PNG', margin, margin + 12, usableW, scaledH);
-      pdf.save(`flash-report-${selectedDate}.pdf`);
+      await exportTableToPdf({
+        element: tableEl,
+        title: 'Flash Report',
+        subtitle: `Report Date: ${displayDate}`,
+        filename: `flash-report-${selectedDate}`,
+        orientation: 'landscape',
+      });
     } catch (err) {
       console.error('PDF export failed:', err);
     } finally {

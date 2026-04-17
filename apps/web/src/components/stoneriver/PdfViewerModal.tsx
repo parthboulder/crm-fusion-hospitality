@@ -4,7 +4,8 @@
  * If the search term appears in multiple PDFs, arrows navigate between them.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { clsx } from 'clsx';
 import { XMarkIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassPlusIcon, MagnifyingGlassMinusIcon } from '@heroicons/react/24/outline';
 import type { PdfMatch } from '../../lib/pdf-search-index';
 import { pdfFileUrl } from '../../lib/pdf-search-index';
@@ -20,6 +21,13 @@ export function PdfViewerModal({ matches, initialIndex = 0, searchTerm, onClose 
   const [currentIdx, setCurrentIdx] = useState(initialIndex);
   const [zoom, setZoom] = useState(100);
   const backdropRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const activeItemRef = useRef<HTMLButtonElement>(null);
+
+  // Auto-scroll the sidebar so the active file is always in view.
+  useLayoutEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [currentIdx]);
 
   const current = matches[currentIdx];
   const total = matches.length;
@@ -42,7 +50,13 @@ export function PdfViewerModal({ matches, initialIndex = 0, searchTerm, onClose 
 
   if (!current) return null;
 
-  const url = pdfFileUrl(current.filePath);
+  // #search=NNN&phrase=true tells Chrome/Edge's built-in PDF viewer to jump
+  // to and highlight the first occurrence of the term. Firefox ignores the
+  // search param but still honors #page if we ever pass one.
+  const baseUrl = pdfFileUrl(current);
+  const url = searchTerm
+    ? `${baseUrl}#search=${encodeURIComponent(searchTerm)}&phrase=true`
+    : baseUrl;
 
   return (
     <div
@@ -50,7 +64,7 @@ export function PdfViewerModal({ matches, initialIndex = 0, searchTerm, onClose 
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
     >
-      <div className="bg-white rounded-lg shadow-2xl flex flex-col w-full max-w-[1100px] h-[90vh]">
+      <div className="bg-white rounded-lg shadow-2xl flex flex-col w-full max-w-[1400px] h-[90vh]">
         {/* Header */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-[#e5e5e5] bg-[#f9fafb] rounded-t-lg">
           <div className="flex-1 min-w-0">
@@ -89,16 +103,62 @@ export function PdfViewerModal({ matches, initialIndex = 0, searchTerm, onClose 
           </button>
         </div>
 
-        {/* PDF viewer area */}
-        <div className="flex-1 overflow-auto bg-[#525659]">
-          <div style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}>
-            <iframe
-              key={url}
-              src={url}
-              className="w-full border-0"
-              style={{ height: `${Math.round(90 * (100 / zoom))}vh`, minWidth: 800 }}
-              title={current.fileName}
-            />
+        {/* Body: sidebar file list + viewer */}
+        <div className="flex-1 flex min-h-0">
+          {total > 1 && (
+            <div
+              ref={sidebarRef}
+              className="w-60 shrink-0 border-r border-[#e5e5e5] bg-white overflow-y-auto"
+            >
+              <div className="sticky top-0 bg-[#f9fafb] border-b border-[#e5e5e5] px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
+                {total} match{total === 1 ? '' : 'es'}
+                {searchTerm && <span className="normal-case text-[#1a1a1a] font-bold"> · "{searchTerm}"</span>}
+              </div>
+              <ul className="divide-y divide-[#f3f4f6]">
+                {matches.map((m, i) => (
+                  <li key={`${m.filePath}-${i}`}>
+                    <button
+                      ref={i === currentIdx ? activeItemRef : undefined}
+                      onClick={() => setCurrentIdx(i)}
+                      className={clsx(
+                        'w-full text-left px-3 py-2 text-[11px] hover:bg-[#f5f5f5] transition-colors',
+                        i === currentIdx && 'bg-[#eff6ff] hover:bg-[#eff6ff]',
+                      )}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={clsx(
+                          'w-1 h-1 rounded-full shrink-0',
+                          i === currentIdx ? 'bg-[#2563eb]' : 'bg-[#d1d5db]',
+                        )} />
+                        <span className={clsx(
+                          'truncate font-medium',
+                          i === currentIdx ? 'text-[#1a1a1a]' : 'text-[#374151]',
+                        )} title={m.fileName}>
+                          {m.fileName}
+                        </span>
+                      </div>
+                      {m.property && (
+                        <div className="text-[10px] text-[#6b7280] truncate pl-2.5">{m.property}</div>
+                      )}
+                      <div className="text-[10px] text-[#9ca3af] truncate pl-2.5">{m.reportType}</div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* PDF viewer area */}
+          <div className="flex-1 overflow-auto bg-[#525659] min-w-0">
+            <div style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}>
+              <iframe
+                key={url}
+                src={url}
+                className="w-full border-0"
+                style={{ height: `${Math.round(90 * (100 / zoom))}vh`, minWidth: 800 }}
+                title={current.fileName}
+              />
+            </div>
           </div>
         </div>
 

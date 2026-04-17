@@ -9,6 +9,7 @@ import { fmtDate, fmtRelative } from '../lib/formatters';
 import { useAuthStore } from '../store/auth.store';
 import { clsx } from 'clsx';
 import { StorageTab } from '../components/admin/StorageTab';
+import { useIpGeo, formatLocation } from '../lib/ipgeo';
 
 type AdminTab = 'users' | 'roles' | 'audit' | 'storage';
 
@@ -248,7 +249,7 @@ function AuditTab() {
         <table className="w-full text-sm">
           <thead className="bg-slate-25 border-b border-gray-100">
             <tr>
-              {['Action', 'Resource', 'User', 'IP', 'Result', 'Time'].map((h) => (
+              {['Action', 'Resource', 'User', 'IP', 'Location', 'Result', 'Time'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -256,7 +257,7 @@ function AuditTab() {
           <tbody className="divide-y divide-gray-50 font-mono">
             {isLoading
               ? Array.from({ length: 8 }).map((_, i) => (
-                  <tr key={i}><td colSpan={6}><div className="h-6 bg-gray-50 animate-pulse mx-4 my-2 rounded" /></td></tr>
+                  <tr key={i}><td colSpan={7}><div className="h-6 bg-gray-50 animate-pulse mx-4 my-2 rounded" /></td></tr>
                 ))
               : (data?.data ?? []).map((log) => (
                   <tr key={log.id} className="hover:bg-slate-25 text-xs">
@@ -271,6 +272,9 @@ function AuditTab() {
                       {log.userEmail ?? (log.userId ? log.userId.slice(0, 8) : '—')}
                     </td>
                     <td className="px-4 py-2.5 text-gray-300">{log.ipAddress ?? '—'}</td>
+                    <td className="px-4 py-2.5 text-gray-500 font-sans whitespace-nowrap">
+                      <IpLocationCell ip={log.ipAddress} />
+                    </td>
                     <td className="px-4 py-2.5">
                       <span className={clsx('font-medium', log.result === 'success' ? 'text-success-600' : 'text-danger-600')}>
                         {log.result}
@@ -286,5 +290,18 @@ function AuditTab() {
         </table>
       </div>
     </div>
+  );
+}
+
+function IpLocationCell({ ip }: { ip: string | null }) {
+  const { data, isFetching, isError } = useIpGeo(ip);
+  if (!ip) return <span className="text-gray-300">—</span>;
+  if (isFetching && !data) return <span className="text-gray-300">…</span>;
+  if (isError || !data) return <span className="text-gray-300">—</span>;
+  const label = formatLocation(data);
+  return (
+    <span title={[data.city, data.region, data.country].filter(Boolean).join(', ')}>
+      {label || <span className="text-gray-300">—</span>}
+    </span>
   );
 }

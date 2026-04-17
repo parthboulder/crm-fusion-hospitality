@@ -15,8 +15,11 @@ import {
   PhotoIcon,
   FunnelIcon,
   XMarkIcon,
+  EyeIcon,
+  ChevronLeftIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
+import { SinglePdfViewer } from '../components/common/SinglePdfViewer';
 
 interface OcrJob {
   id: string;
@@ -87,6 +90,17 @@ export function DocumentsPage() {
   const [selectedReportType, setSelectedReportType] = useState('');
   const [search, setSearch] = useState('');
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [previewJob, setPreviewJob] = useState<{ id: string; name: string; url: string } | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  function openPreview(job: OcrJob) {
+    // Same-origin proxy — instant, no signed-URL round-trip.
+    setPreviewJob({
+      id: job.id,
+      name: job.originalName,
+      url: `/api/v1/ocr/jobs/${job.id}/file`,
+    });
+  }
 
   // Pull a wide unfiltered slice once to derive the dropdown options. The
   // snapshot is small JSON metadata (no extracted_data), so 5000 rows is
@@ -208,10 +222,35 @@ export function DocumentsPage() {
 
   return (
     <div className="flex h-full overflow-hidden">
+      {/* Collapsed rail — visible only when sidebar is closed */}
+      {!filtersOpen && (
+        <div className="w-9 shrink-0 border-r border-neutral-200 bg-white hidden lg:flex flex-col items-center pt-3">
+          <button
+            onClick={() => setFiltersOpen(true)}
+            className="p-1.5 rounded hover:bg-neutral-100 text-neutral-500 hover:text-neutral-700 transition-colors"
+            title="Show filters"
+          >
+            <FunnelIcon className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Left sidebar — filters */}
-      <div className="w-56 shrink-0 border-r border-neutral-200 bg-white overflow-y-auto">
+      <div className={clsx(
+        'w-56 shrink-0 border-r border-neutral-200 bg-white overflow-y-auto',
+        filtersOpen ? 'hidden lg:block' : 'hidden',
+      )}>
         <div className="p-4">
-          <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-3">Filters</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">Filters</h2>
+            <button
+              onClick={() => setFiltersOpen(false)}
+              className="p-0.5 rounded hover:bg-neutral-100 text-neutral-400 hover:text-neutral-600 transition-colors"
+              title="Hide filters"
+            >
+              <ChevronLeftIcon className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           <div className="mb-4">
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Date</label>
@@ -342,11 +381,11 @@ export function DocumentsPage() {
           ) : (
             <div className="divide-y divide-neutral-100">
               {jobs.map((j) => (
-                <button
+                <div
                   key={j.id}
                   onClick={() => setSelectedJobId(j.id)}
                   className={clsx(
-                    'w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors flex items-center gap-3',
+                    'w-full text-left px-4 py-3 hover:bg-neutral-50 transition-colors flex items-center gap-3 cursor-pointer',
                     selectedJobId === j.id && 'bg-brand-50 hover:bg-brand-50',
                   )}
                 >
@@ -389,7 +428,17 @@ export function DocumentsPage() {
                   <span className="text-[10px] text-neutral-400 tabular-nums shrink-0">
                     {fmtFileSize(j.fileSizeBytes)}
                   </span>
-                </button>
+                  {!j.archived && j.status === 'completed' && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); openPreview(j); }}
+                      title="Preview PDF"
+                      className="shrink-0 inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-brand-700 hover:bg-brand-50 rounded transition-colors"
+                    >
+                      <EyeIcon className="w-3 h-3" />
+                      Preview
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -460,6 +509,16 @@ export function DocumentsPage() {
             ) : null}
           </div>
         </div>
+      )}
+
+      {previewJob && (
+        <SinglePdfViewer
+          url={previewJob.url}
+          title={previewJob.name}
+          subtitle="Document preview"
+          downloadName={previewJob.name}
+          onClose={() => setPreviewJob(null)}
+        />
       )}
     </div>
   );

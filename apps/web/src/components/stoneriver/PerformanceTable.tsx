@@ -4,7 +4,7 @@
  * Supports period toggle (All / Day / MTD / YTD) and PDF export.
  */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import type { DailyHotelPerformance, SparklinePoint } from './types';
 import { PROPERTIES, GROUP_ORDER } from '../../constants/stoneriver-properties';
 import { RevenueFlashRow } from './PerformanceTableRow';
@@ -47,7 +47,109 @@ export function PerformanceTable({
   filterRegions = [],
 }: PerformanceTableProps) {
   const [viewPeriod, setViewPeriod] = useState<ViewPeriod>('all');
-  const tableRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLDivElement | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Click-and-drag horizontal scroll for the wide table.
+   *
+   * Ref callback instead of useRef+useEffect because the component
+   * early-returns a loading skeleton while `isLoading` is true; the scroll
+   * container isn't in the DOM on first render, and a static effect dep
+   * array would miss the later mount. A ref callback fires exactly when
+   * the node attaches/detaches.
+   *
+   * Wheel-scroll is intentionally NOT hijacked — the page keeps its
+   * normal vertical scroll behavior. Only click+drag pans horizontally.
+   *
+   * We only commit to panning after the cursor moves more than 6px, so
+   * regular clicks on number cells still open the PDF preview. When a
+   * drag has happened, the trailing `click` is swallowed so cell buttons
+   * don't fire on release.
+   */
+  const attachScrollHandlers = useCallback((el: HTMLDivElement | null) => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    tableRef.current = el;
+    if (!el) return;
+
+    const updateCursor = () => {
+      el.style.cursor = el.scrollWidth > el.clientWidth ? 'grab' : '';
+    };
+    updateCursor();
+    const ro = new ResizeObserver(updateCursor);
+    ro.observe(el);
+
+    let pressing = false;
+    let panning = false;
+    let startX = 0;
+    let startY = 0;
+    let startScroll = 0;
+    const THRESHOLD_PX = 6;
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest('input, textarea, select')) return;
+      if (el.scrollWidth <= el.clientWidth) return;
+
+      pressing = true;
+      panning = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      startScroll = el.scrollLeft;
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!pressing) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!panning) {
+        if (Math.hypot(dx, dy) < THRESHOLD_PX) return;
+        panning = true;
+        el.style.cursor = 'grabbing';
+        el.style.userSelect = 'none';
+        document.body.style.userSelect = 'none';
+      }
+      el.scrollLeft = startScroll - dx;
+      e.preventDefault();
+    };
+
+    const onMouseUp = () => {
+      if (!pressing) return;
+      const wasPanning = panning;
+      pressing = false;
+      panning = false;
+      el.style.userSelect = '';
+      document.body.style.userSelect = '';
+      updateCursor();
+
+      if (wasPanning) {
+        const swallow = (ev: MouseEvent) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          window.removeEventListener('click', swallow, true);
+        };
+        window.addEventListener('click', swallow, true);
+      }
+    };
+
+    el.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+
+    cleanupRef.current = () => {
+      ro.disconnect();
+      el.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      el.style.cursor = '';
+      el.style.userSelect = '';
+      document.body.style.userSelect = '';
+    };
+  }, []);
+
+  useEffect(() => () => cleanupRef.current?.(), []);
 
   if (isLoading) {
     return (
@@ -101,12 +203,13 @@ export function PerformanceTable({
         </p>
       )}
 
-      <div ref={tableRef} className="overflow-x-auto border border-[#e5e5e5] rounded" id="revenue-flash-table">
-        <table className="w-full text-[11px] border-collapse" style={{ fontVariantNumeric: 'tabular-nums', minWidth: viewPeriod === 'all' ? 1400 : 600 }}>
+      <div ref={attachScrollHandlers} className="overflow-x-auto border border-[#e5e5e5] rounded" id="revenue-flash-table">
+        {/* border-collapse: separate (not collapse) — required for sticky <td>/<th> to pin during horizontal scroll on Chromium. */}
+        <table className="w-full text-[11px]" style={{ borderCollapse: 'separate', borderSpacing: 0, fontVariantNumeric: 'tabular-nums', minWidth: viewPeriod === 'all' ? 1400 : 600 }}>
           {/* Two-level header: section labels, then column labels */}
           <thead>
             <tr className="bg-[#1f2937]">
-              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] sticky left-0 z-10 min-w-[180px]">
+              <th className="px-2 py-1 text-center text-[10px] font-bold text-white bg-[#1f2937] min-w-[180px]">
                 {displayDate}
               </th>
               {showDay && <SectionHeader label="Date" colSpan={8} />}
@@ -114,7 +217,7 @@ export function PerformanceTable({
               {showYtd && <SectionHeader label="Year to Date" colSpan={6} />}
             </tr>
             <tr className="bg-[#f9fafb] border-b border-[#e5e5e5]">
-              <th className="sticky left-0 bg-[#f9fafb] z-10 min-w-[180px]" />
+              <th className="bg-[#f9fafb] min-w-[180px]" />
               {/* Day columns */}
               {showDay && <>
                 <th className={`${thRight} border-l border-[#e5e5e5]`}>Occ%</th>

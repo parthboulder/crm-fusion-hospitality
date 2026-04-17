@@ -11,6 +11,7 @@ import { useEngineeringData } from '../hooks/useEngineeringData';
 import { useLatestDataDate } from '../hooks/useLatestDataDate';
 import { PROPERTIES } from '../constants/stoneriver-properties';
 import type { OOORoom } from '../components/stoneriver/engineering-types';
+import { exportTableToPdf } from '../lib/pdf-table-export';
 
 const TODAY = format(new Date(), 'yyyy-MM-dd');
 
@@ -206,23 +207,14 @@ export function EngineeringDashboardPage() {
       const tableId = viewTab === 'summary' ? 'eng-table-summary' : `eng-table-${viewTab === 'ooo' ? 'ooo-rooms' : 'long-term-ooo-rooms'}`;
       const tableEl = document.getElementById(tableId);
       if (!tableEl) return;
-      const { default: html2canvas } = await import('html2canvas-pro');
-      const { jsPDF } = await import('jspdf');
-      const canvas = await html2canvas(tableEl, { scale: 2, backgroundColor: '#ffffff', logging: false });
-      const imgData = canvas.toDataURL('image/png');
-      const pageW = 297, margin = 8;
-      const usableW = pageW - margin * 2;
-      const ratio = usableW / canvas.width;
-      const scaledH = canvas.height * ratio;
-      const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-      pdf.setFontSize(12);
-      pdf.setFont('helvetica', 'bold');
-      pdf.text('Engineering Flash', margin, margin + 4);
-      pdf.setFontSize(9);
-      pdf.setFont('helvetica', 'normal');
-      pdf.text(`Report Date: ${displayDate}`, margin, margin + 9);
-      pdf.addImage(imgData, 'PNG', margin, margin + 12, usableW, scaledH);
-      pdf.save(`engineering-flash-${selectedDate}.pdf`);
+      const tabLabel = viewTab === 'summary' ? 'Summary' : viewTab === 'ooo' ? 'OOO Rooms' : 'Long-Term OOO';
+      await exportTableToPdf({
+        element: tableEl,
+        title: `Engineering Flash — ${tabLabel}`,
+        subtitle: `Report Date: ${displayDate}`,
+        filename: `engineering-flash-${viewTab}-${selectedDate}`,
+        orientation: 'landscape',
+      });
     } catch (err) {
       console.error('PDF export failed:', err);
     } finally {

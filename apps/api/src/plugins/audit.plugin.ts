@@ -24,12 +24,43 @@ export interface AuditEntry {
   actorOrgId?: string;
 }
 
+/**
+ * Prefer a real public IP when available.
+ *
+ * `req.ip` comes from the socket / X-Forwarded-For chain. In local dev it's
+ * always 127.0.0.1; behind a mis-configured proxy it can be the proxy's IP.
+ * The SPA attaches `X-Client-Public-IP` (resolved via ipify) on every
+ * request — we trust it only when the socket IP is private/local so callers
+ * outside the SPA can't spoof their audit trail from the public internet.
+ */
+function resolveClientIp(req: FastifyRequest): string | null {
+  const sockIp = req.ip ?? null;
+  const isPrivate = (ip: string): boolean =>
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
+    ip.startsWith('fc') ||
+    ip.startsWith('fd');
+
+  if (sockIp && !isPrivate(sockIp)) return sockIp;
+
+  const hdr = req.headers['x-client-public-ip'];
+  const claimed = Array.isArray(hdr) ? hdr[0] : hdr;
+  if (claimed && /^[0-9a-fA-F.:]+$/.test(claimed) && !isPrivate(claimed)) {
+    return claimed;
+  }
+  return sockIp;
+}
+
 export const auditPlugin = fp(async (app: FastifyInstance) => {
   app.decorate(
     'audit',
     async (req: FastifyRequest, entry: AuditEntry): Promise<void> => {
       const supabase = supabaseAdmin();
       const user = req.authUser;
+      const ip = resolveClientIp(req);
 
       const { error } = await supabase
         .from('audit_logs')
@@ -42,7 +73,7 @@ export const auditPlugin = fp(async (app: FastifyInstance) => {
           resource_id: entry.resourceId ?? null,
           before_value: entry.beforeValue ? (entry.beforeValue as object) : null,
           after_value: entry.afterValue ? (entry.afterValue as object) : null,
-          ip_address: req.ip ?? null,
+          ip_address: ip,
           user_agent: req.headers['user-agent'] ?? null,
           request_id: req.id,
           result: entry.result ?? 'success',
@@ -63,7 +94,7 @@ export const auditPlugin = fp(async (app: FastifyInstance) => {
             resourceId: entry.resourceId ?? null,
             userId: user?.id ?? null,
             orgId: user?.orgId ?? null,
-            ip: req.ip ?? null,
+            ip,
             requestId: req.id,
             dbError: error.message,
           }) + '\n';

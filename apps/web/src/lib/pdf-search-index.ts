@@ -1,13 +1,18 @@
 /**
- * Builds a search index mapping numbers to PDF files that contain them.
- * Used by the Revenue Flash dashboard to let users click a number
- * and see which source PDFs contain that value.
+ * Number-search across OCR'd PDFs, served by the API from the DB (no JSON file).
+ * Used by the Revenue Flash dashboard to let users click a number and see
+ * which source PDFs contain that value.
  */
 
+import { api } from './api-client';
+
 export interface PdfMatch {
+  jobId: string;
   fileName: string;
+  /** Same as `fileName` — kept for modal backward-compat. */
   filePath: string;
-  relativePath: string;
+  /** Signed Supabase storage URL — expires per env.SIGNED_URL_EXPIRY_SECONDS. */
+  url: string;
   reportType: string;
   property: string | null;
   dateFolder: string;
@@ -15,108 +20,74 @@ export interface PdfMatch {
   snippet: string;
 }
 
-interface ScanResult {
-  filePath?: string;
-  relativePath?: string;
-  fileName?: string;
-  extension?: string;
-  reportType?: string;
-  property?: string | null;
-  dateFolder: string;
-  fullText?: string;
-}
-
-interface ScanOutput {
-  scanRoot: string;
-  results: ScanResult[];
-}
-
-let cachedData: ScanOutput | null = null;
-let cachedScanRoot = '';
-
-async function loadData(): Promise<ScanOutput> {
-  if (cachedData) return cachedData;
-  try {
-    const res = await fetch('/data/output.json');
-    if (!res.ok) return { scanRoot: '', results: [] };
-    cachedData = (await res.json()) as ScanOutput;
-    cachedScanRoot = cachedData.scanRoot;
-    return cachedData;
-  } catch {
-    return { scanRoot: '', results: [] };
-  }
+interface SearchResponse {
+  success: boolean;
+  data: Array<{
+    jobId: string;
+    fileName: string;
+    property: string | null;
+    reportType: string | null;
+    dateFolder: string | null;
+    snippet: string;
+    url: string;
+  }>;
 }
 
 /**
- * Search for a number/value across all PDF text for a given date.
- * Returns list of PDFs that contain the search term.
+ * Search for a number/value across all completed OCR jobs. If `date` is
+ * given, results are scoped to jobs whose `date_folder` matches it. Returns
+ * jobs that contain the number along with a signed preview URL.
  */
 export async function searchPdfs(query: string, date: string): Promise<PdfMatch[]> {
   if (!query || query.length < 2) return [];
 
-  const data = await loadData();
-  const matches: PdfMatch[] = [];
+  const mapRow = (r: SearchResponse['data'][number]): PdfMatch => ({
+    jobId: r.jobId,
+    fileName: r.fileName,
+    filePath: r.fileName,
+    url: r.url,
+    reportType: r.reportType ?? 'Unknown',
+    property: r.property,
+    dateFolder: r.dateFolder ?? '',
+    snippet: r.snippet,
+  });
 
-  // Normalize: create variants of the search query
-  const cleaned = query.replace(/[$,%]/g, '').trim();
-  const variants = new Set<string>();
-  variants.add(cleaned);
-  // Add comma-formatted variant (8075 → 8,075)
-  if (/^\d{4,}$/.test(cleaned)) {
-    variants.add(Number(cleaned).toLocaleString('en-US'));
-  }
-  // If input has commas, also search without (8,075 → 8075)
-  if (cleaned.includes(',')) {
-    variants.add(cleaned.replace(/,/g, ''));
-  }
+  // Only preview PDFs — xlsx/csv won't render inline and just download.
+  const isPdf = (r: SearchResponse['data'][number]) => /\.pdf$/i.test(r.fileName);
 
-  const pdfs = data.results.filter(
-    (r) => r.dateFolder === date && r.extension === '.pdf' && r.fullText,
-  );
-
-  for (const pdf of pdfs) {
-    const text = pdf.fullText!;
-    let found = false;
-    let snippet = '';
-
-    for (const v of variants) {
-      const idx = text.indexOf(v);
-      if (idx >= 0) {
-        found = true;
-        const start = Math.max(0, idx - 40);
-        const end = Math.min(text.length, idx + v.length + 40);
-        snippet = (start > 0 ? '...' : '') + text.slice(start, end).replace(/\n/g, ' ') + (end < text.length ? '...' : '');
-        break;
-      }
+  try {
+    // First try a date-scoped search — the most precise result for when the
+    // user is looking at a specific report date's numbers.
+    if (date) {
+      const scopedParams = new URLSearchParams({ q: query, date });
+      const scoped = await api.get<SearchResponse>(
+        `/ocr/jobs/search-number?${scopedParams.toString()}`,
+      );
+      const pdfs = (scoped?.data ?? []).filter(isPdf);
+      if (pdfs.length > 0) return pdfs.map(mapRow);
     }
 
-    if (found) {
-      matches.push({
-        fileName: pdf.fileName ?? 'Unknown',
-        filePath: pdf.filePath ?? '',
-        relativePath: pdf.relativePath ?? '',
-        reportType: pdf.reportType ?? 'Unknown',
-        property: pdf.property ?? null,
-        dateFolder: pdf.dateFolder,
-        snippet,
-      });
-    }
+    // Fallback: search across all dates. The dashboard's selected date often
+    // doesn't match the OCR'd PDFs' date_folder (e.g. today's dashboard vs
+    // last week's uploaded files), so returning cross-date matches beats an
+    // empty result.
+    const wide = await api.get<SearchResponse>(
+      `/ocr/jobs/search-number?${new URLSearchParams({ q: query }).toString()}`,
+    );
+    const pdfs = (wide?.data ?? []).filter(isPdf);
+    return pdfs.map(mapRow);
+  } catch (err) {
+    console.error('pdf search failed', err);
+    return [];
   }
-
-  return matches;
 }
 
 /**
- * Convert a file path from scan output to a URL the browser can fetch.
- * The Vite dev server serves PDFs via /pdfs/ prefix using a custom plugin.
- * Path: C:/.../OneDrive_2026-03-27/Revenue Flash/... → /pdfs/Revenue Flash/...
+ * For the modal: the match already carries a signed URL, so this just
+ * returns it. Kept as a function so callers don't need to special-case
+ * which field to use.
  */
-export function pdfFileUrl(filePath: string): string {
-  const marker = 'OneDrive_2026-03-27';
-  const idx = filePath.indexOf(marker);
-  if (idx >= 0) {
-    const relativePath = filePath.slice(idx + marker.length + 1).replace(/\\/g, '/');
-    return '/pdfs/' + encodeURIComponent(relativePath).replace(/%2F/g, '/');
-  }
-  return filePath;
+export function pdfFileUrl(match: PdfMatch | string): string {
+  if (typeof match === 'string') return match;
+  return match.url;
 }

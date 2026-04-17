@@ -29,10 +29,12 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   FunnelIcon,
+  EyeIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
 import { useUploadStore } from '../store/upload.store';
 import { UploadProgressCard as SharedUploadProgressCard } from '../components/upload/UploadProgressCard';
+import { SinglePdfViewer } from '../components/common/SinglePdfViewer';
 
 type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -209,6 +211,7 @@ export function OcrUploadsPage() {
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
+  const [previewJob, setPreviewJob] = useState<{ id: string; name: string; url: string } | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -333,6 +336,15 @@ export function OcrUploadsPage() {
       qc.invalidateQueries({ queryKey: ['ocr-job', jobId] });
     },
   });
+
+  const openPreview = useCallback((job: OcrJob) => {
+    // Same-origin proxy — instant, no network round-trip to fetch a signed URL.
+    setPreviewJob({
+      id: job.id,
+      name: job.originalName,
+      url: `/api/v1/ocr/jobs/${job.id}/file`,
+    });
+  }, []);
 
   // Upload entry point — delegates to the global store so progress survives
   // navigation. The store handles concurrency, abort, and auto-clear.
@@ -1161,6 +1173,19 @@ export function OcrUploadsPage() {
                     </div>
                   </button>
                   <div className="shrink-0 flex items-center gap-1">
+                    {job.status === 'completed' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openPreview(job);
+                        }}
+                        title="Preview PDF"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-brand-700 hover:bg-brand-50 rounded transition-colors"
+                      >
+                        <EyeIcon className="w-3 h-3" />
+                        Preview
+                      </button>
+                    )}
                     {job.status === 'pending' && (
                       <button
                         onClick={(e) => {
@@ -1422,6 +1447,16 @@ export function OcrUploadsPage() {
             )}
           </div>
         </div>
+      )}
+
+      {previewJob && (
+        <SinglePdfViewer
+          url={previewJob.url}
+          title={previewJob.name}
+          subtitle="OCR source file"
+          downloadName={previewJob.name}
+          onClose={() => setPreviewJob(null)}
+        />
       )}
     </div>
   );

@@ -796,6 +796,148 @@ export async function ocrRoutes(app: FastifyInstance) {
     });
   });
 
+  // ─── GET /jobs/:id/file ──────────────────────────────────────────────────
+  // Stream the job's file bytes through our own origin. Same-origin delivery
+  // lets Chrome's built-in PDF viewer honor the #search=NNN URL fragment
+  // (cross-origin signed Supabase URLs ignore it). Used by the PDF preview
+  // modal so clicked-on numbers get highlighted inside the rendered PDF.
+  app.get('/jobs/:id/file', async (req, reply) => {
+    const id = parseJobId(req, reply);
+    if (!id) return;
+
+    const supabase = supabaseAdmin();
+    const { data: job, error } = await supabase
+      .from('ocr_jobs')
+      .select('storage_path, original_name, file_type')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) {
+      app.log.error({ err: error.message, id }, 'ocr_file_lookup_failed');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: error.message },
+      });
+    }
+    if (!job) {
+      return reply.code(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Job not found.' },
+      });
+    }
+
+    const { data: blob, error: dlErr } = await supabase.storage
+      .from(env.STORAGE_BUCKET_OCR)
+      .download(job.storage_path);
+
+    if (dlErr || !blob) {
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DOWNLOAD_FAILED', message: dlErr?.message ?? 'unknown' },
+      });
+    }
+
+    const buf = Buffer.from(await blob.arrayBuffer());
+    // Relax CSP for this response only so the SPA can render the PDF inside
+    // its <iframe> preview modal. The global policy ships `frame-ancestors
+    // 'none'` which otherwise blocks any framing — including first-party.
+    // We also drop X-Frame-Options (legacy sibling of frame-ancestors).
+    return reply
+      .header('Content-Type', job.file_type || blob.type || 'application/octet-stream')
+      .header('Content-Disposition', `inline; filename="${job.original_name.replace(/"/g, '')}"`)
+      .header('Cache-Control', 'private, max-age=60')
+      .header(
+        'Content-Security-Policy',
+        "default-src 'self'; frame-ancestors 'self'; object-src 'self'",
+      )
+      .removeHeader('X-Frame-Options')
+      .send(buf);
+  });
+
+  // ─── GET /jobs/search-number ─────────────────────────────────────────────
+  // Search completed OCR jobs for a number occurring in their OCR'd text.
+  // Used by the Revenue Flash dashboard: user clicks a number → we find
+  // every PDF whose text contains that number, build signed URLs, and
+  // return them so the modal viewer can flip between matches.
+  //
+  // Implementation note: we do a coarse DB-side ILIKE against one canonical
+  // variant (the comma-free form) to narrow the row set, then do the real
+  // variant matching in-memory. That avoids PostgREST `.or()` quirks with
+  // comma-containing values and keeps the query simple.
+  app.get('/jobs/search-number', async (req, reply) => {
+    const q = req.query as Record<string, string | undefined>;
+    const rawQuery = (q['q'] ?? '').trim();
+    const date = (q['date'] ?? '').trim();
+    const limit = Math.min(Number(q['limit'] ?? '50'), 200);
+
+    if (rawQuery.length < 2) {
+      return reply.send({ success: true, data: [] });
+    }
+
+    // Canonical form (no separators) — used for both the DB filter and the
+    // in-memory match. PDFs typically print numbers either as "8075" or
+    // "8,075"; ILIKE on the digits alone won't catch the comma form, so we
+    // build both variants and test each in-memory.
+    const digits = rawQuery.replace(/[$%,\s]/g, '').trim();
+    if (digits.length < 2) {
+      return reply.send({ success: true, data: [] });
+    }
+
+    const variants = new Set<string>();
+    variants.add(digits);
+    if (/^\d{4,}$/.test(digits)) {
+      variants.add(Number(digits).toLocaleString('en-US'));
+    }
+    if (/^\d+\.\d+$/.test(rawQuery)) {
+      variants.add(rawQuery);
+    }
+
+    const supabase = supabaseAdmin();
+
+    // Perf: do NOT select extracted_data. It's multi-MB per row and pulling
+    // it back just to substring a snippet burns hundreds of ms. We rely on
+    // Postgres ILIKE to filter and skip the client-side re-match entirely.
+    // Snippet is returned empty for speed; the sidebar already shows
+    // filename + property + reportType which is enough context.
+    const ilikeEscape = (s: string) => s.replace(/[%_\\]/g, '\\$&');
+    const coarse = ilikeEscape(digits);
+
+    let builder = supabase
+      .from('ocr_jobs')
+      .select('id, original_name, property, date_folder, report_type, storage_path')
+      .eq('status', 'completed')
+      .ilike('extracted_data->>fullText', `%${coarse}%`)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (date) builder = builder.eq('date_folder', date);
+
+    const { data: rows, error } = await builder;
+    if (error) {
+      app.log.error({ err: error.message, rawQuery, date }, 'ocr_search_number_failed');
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: error.message },
+      });
+    }
+
+    // Return same-origin proxy URLs instead of Supabase signed URLs. Two
+    // reasons: (1) Chrome's PDF viewer only honors #search=N fragments on
+    // same-origin resources, so highlighting the clicked number in-viewer
+    // requires this; (2) no per-row signed-URL creation → faster response.
+    const matches = (rows ?? []).map((row) => ({
+      jobId: row.id,
+      fileName: row.original_name,
+      property: row.property ?? null,
+      reportType: row.report_type ?? null,
+      dateFolder: row.date_folder ?? null,
+      snippet: '',
+      url: `/api/v1/ocr/jobs/${row.id}/file`,
+    }));
+
+    return reply.send({ success: true, data: matches });
+  });
+
   // ─── POST /jobs/snapshot ─────────────────────────────────────────────────
   // Dump the current ocr_jobs table to a server-side JSON file. The
   // Documents page reads from /jobs/persisted (below) so even after

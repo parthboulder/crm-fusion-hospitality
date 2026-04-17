@@ -17,6 +17,7 @@ import {
 import { clsx } from 'clsx';
 import { useAuthStore } from '../../store/auth.store';
 import { api } from '../../lib/api-client';
+import { useMyIp, formatLocation } from '../../lib/ipgeo';
 
 const nav = [
   { label: 'Dashboard',   to: '/dashboard',   Icon: HomeIcon },
@@ -28,6 +29,7 @@ const nav = [
 export function Sidebar() {
   const { user, clearUser } = useAuthStore();
   const navigate = useNavigate();
+  const { data: myIp } = useMyIp();
   const [collapsed, setCollapsed] = useState(false);
 
   async function handleLogout() {
@@ -142,6 +144,17 @@ export function Sidebar() {
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-neutral-800 truncate">{user?.fullName}</p>
               <p className="text-xs text-neutral-400 truncate capitalize">{user?.role?.replace('_', ' ')}</p>
+              {myIp && (
+                <p
+                  className="text-[10px] text-neutral-400 truncate tabular-nums mt-0.5"
+                  title={`IP ${myIp.ip}${formatLocation(myIp) ? ` · ${formatLocation(myIp)}` : ''}`}
+                >
+                  {myIp.ip}
+                  {formatLocation(myIp) && (
+                    <span className="ml-1 text-neutral-500">· {formatLocation(myIp)}</span>
+                  )}
+                </p>
+              )}
             </div>
           )}
           <button

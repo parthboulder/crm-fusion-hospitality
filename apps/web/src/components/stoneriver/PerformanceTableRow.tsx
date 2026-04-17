@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { clsx } from 'clsx';
+import { ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { fmtCurrency, fmtRate, fmtPct, fmtNumber, fmtVariance, fmtDate } from '../../lib/formatters';
 import { usePdfSearch } from './PdfSearchContext';
 import type { DailyHotelPerformance, SparklinePoint } from './types';
@@ -78,9 +79,15 @@ function ExpandedDetail({ data, sparklinePoints }: { data: DailyHotelPerformance
             {last7.map((pt) => (
               <tr key={pt.report_date} className="border-t border-[#e5e5e5]">
                 <td className="pr-4 py-0.5 text-[#6b7280]">{fmtDate(pt.report_date)}</td>
-                <td className="pr-4 py-0.5 text-right">{pt.occupancy_day != null ? fmtPct(pt.occupancy_day) : '—'}</td>
-                <td className="pr-4 py-0.5 text-right">{pt.revpar_day != null ? fmtCurrency(pt.revpar_day) : '—'}</td>
-                <td className="py-0.5 text-right">{pt.revenue_day != null ? fmtCurrency(pt.revenue_day) : '—'}</td>
+                <td className="pr-4 py-0.5 text-right">
+                  <ClickablePct value={pt.occupancy_day ?? null} />
+                </td>
+                <td className="pr-4 py-0.5 text-right">
+                  <ClickableValue value={pt.revpar_day ?? null} formatted={pt.revpar_day != null ? fmtCurrency(pt.revpar_day) : '—'} />
+                </td>
+                <td className="py-0.5 text-right">
+                  <ClickableValue value={pt.revenue_day ?? null} formatted={pt.revenue_day != null ? fmtCurrency(pt.revenue_day) : '—'} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -105,40 +112,84 @@ function ClickableValue({ value, formatted, className }: { value: number | null;
   );
 }
 
+/**
+ * Percent value → click searches PDFs using the raw percent number (e.g. 47.0),
+ * which is how these values appear in the source documents.
+ */
+function ClickablePct({ value, className }: { value: number | null; className?: string }) {
+  const { searchAndOpen } = usePdfSearch();
+  if (value == null) return <span className={className}>—</span>;
+  return (
+    <span
+      className={clsx(className, 'cursor-pointer hover:underline hover:decoration-dotted')}
+      onClick={(e) => { e.stopPropagation(); searchAndOpen(value.toFixed(1)); }}
+      title="Click to find in source PDFs"
+    >
+      {fmtPct(value)}
+    </span>
+  );
+}
+
 export function RevenueFlashRow({ property, data, sparklinePoints, showDay = true, showMtd = true, showYtd = true }: RevenueFlashRowProps) {
   const [expanded, setExpanded] = useState(false);
   const d = data;
 
+  const canExpand = !!data;
+
   return (
     <>
       <tr
-        onClick={() => data && setExpanded((v) => !v)}
         className={clsx(
           'border-b border-[#e5e5e5] text-[11px] transition-colors',
-          data ? 'cursor-pointer hover:bg-[#f9fafb]' : 'opacity-40 cursor-default',
+          data ? 'hover:bg-[#f9fafb]' : 'opacity-40',
           expanded && 'bg-[#f5f5f5]',
         )}
       >
-        {/* Property name — sticky */}
-        <td className="px-2 py-1 sticky left-0 bg-white z-[5] border-r border-[#e5e5e5]">
-          <span className="font-medium text-[#1a1a1a] truncate block max-w-[200px]" title={property.name}>
-            {property.name}
-          </span>
+        {/* Property name — scrolls with the table per user request */}
+        <td
+          className="px-2 py-1 bg-white border-r border-[#e5e5e5]"
+          style={{ minWidth: 200, width: 200 }}
+        >
+          <div className="flex items-center gap-1.5">
+            {canExpand ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
+                title={expanded ? 'Hide last 7 days' : 'Show last 7 days'}
+                aria-label={expanded ? 'Collapse details' : 'Expand details'}
+                className="shrink-0 p-0.5 text-[#9ca3af] hover:text-[#1a1a1a] hover:bg-[#e5e7eb] rounded transition-colors"
+              >
+                {expanded
+                  ? <ChevronDownIcon className="w-3 h-3" />
+                  : <ChevronRightIcon className="w-3 h-3" />}
+              </button>
+            ) : (
+              <span className="w-3 h-3 shrink-0" />
+            )}
+            <span className="font-medium text-[#1a1a1a] truncate" title={property.name}>
+              {property.name}
+            </span>
+          </div>
         </td>
 
         {/* ─── Day section ─── */}
         {showDay && <>
           <td className={`${cell} border-l border-[#e5e5e5] ${occColor(d?.occupancy_day ?? null)}`}>
-            {d?.occupancy_day != null ? fmtPct(d.occupancy_day) : '—'}
+            <ClickablePct value={d?.occupancy_day ?? null} />
           </td>
-          <td className={`${cell} ${adrColor(d?.adr_day ?? null)}`}>{d?.adr_day != null ? fmtRate(d.adr_day) : '—'}</td>
-          <td className={`${cell} ${revparColor(d?.revpar_day ?? null)}`}>{d?.revpar_day != null ? fmtRate(d.revpar_day) : '—'}</td>
-          <td className={cell}>{d?.total_rooms_sold != null ? fmtNumber(d.total_rooms_sold) : '—'}</td>
+          <td className={`${cell} ${adrColor(d?.adr_day ?? null)}`}>
+            <ClickableValue value={d?.adr_day ?? null} formatted={d?.adr_day != null ? fmtRate(d.adr_day) : '—'} />
+          </td>
+          <td className={`${cell} ${revparColor(d?.revpar_day ?? null)}`}>
+            <ClickableValue value={d?.revpar_day ?? null} formatted={d?.revpar_day != null ? fmtRate(d.revpar_day) : '—'} />
+          </td>
+          <td className={cell}>
+            <ClickableValue value={d?.total_rooms_sold ?? null} formatted={d?.total_rooms_sold != null ? fmtNumber(d.total_rooms_sold) : '—'} />
+          </td>
           <td className={`${cell} ${revenueColor(d?.revenue_day ?? null)}`}>
             <ClickableValue value={d?.revenue_day ?? null} formatted={d?.revenue_day != null ? fmtCurrency(d.revenue_day) : '—'} />
           </td>
           <td className={clsx(cell, d?.ooo_rooms && d.ooo_rooms > 0 ? 'text-[#dc2626] font-semibold' : 'text-[#9ca3af]')}>
-            {d?.ooo_rooms != null ? d.ooo_rooms : '—'}
+            <ClickableValue value={d?.ooo_rooms ?? null} formatted={d?.ooo_rooms != null ? String(d.ooo_rooms) : '—'} />
           </td>
           <td className={cellMuted}>
             <ClickableValue value={d?.py_revenue_day ?? null} formatted={d?.py_revenue_day != null ? fmtCurrency(d.py_revenue_day) : '—'} />
@@ -151,10 +202,14 @@ export function RevenueFlashRow({ property, data, sparklinePoints, showDay = tru
         {/* ─── MTD section ─── */}
         {showMtd && <>
           <td className={`${cell} border-l border-[#d1d5db] ${occColor(d?.occupancy_mtd ?? null)}`}>
-            {d?.occupancy_mtd != null ? fmtPct(d.occupancy_mtd) : '—'}
+            <ClickablePct value={d?.occupancy_mtd ?? null} />
           </td>
-          <td className={`${cell} ${adrColor(d?.adr_mtd ?? null)}`}>{d?.adr_mtd != null ? fmtRate(d.adr_mtd) : '—'}</td>
-          <td className={`${cell} ${revparColor(d?.revpar_mtd ?? null)}`}>{d?.revpar_mtd != null ? fmtRate(d.revpar_mtd) : '—'}</td>
+          <td className={`${cell} ${adrColor(d?.adr_mtd ?? null)}`}>
+            <ClickableValue value={d?.adr_mtd ?? null} formatted={d?.adr_mtd != null ? fmtRate(d.adr_mtd) : '—'} />
+          </td>
+          <td className={`${cell} ${revparColor(d?.revpar_mtd ?? null)}`}>
+            <ClickableValue value={d?.revpar_mtd ?? null} formatted={d?.revpar_mtd != null ? fmtRate(d.revpar_mtd) : '—'} />
+          </td>
           <td className={`${cell} ${revenueColor(d?.revenue_mtd ?? null)}`}>
             <ClickableValue value={d?.revenue_mtd ?? null} formatted={d?.revenue_mtd != null ? fmtCurrency(d.revenue_mtd) : '—'} />
           </td>
@@ -169,10 +224,14 @@ export function RevenueFlashRow({ property, data, sparklinePoints, showDay = tru
         {/* ─── YTD section ─── */}
         {showYtd && <>
           <td className={`${cell} border-l border-[#d1d5db] ${occColor(d?.occupancy_ytd ?? null)}`}>
-            {d?.occupancy_ytd != null ? fmtPct(d.occupancy_ytd) : '—'}
+            <ClickablePct value={d?.occupancy_ytd ?? null} />
           </td>
-          <td className={`${cell} ${adrColor(d?.adr_ytd ?? null)}`}>{d?.adr_ytd != null ? fmtRate(d.adr_ytd) : '—'}</td>
-          <td className={`${cell} ${revparColor(d?.revpar_ytd ?? null)}`}>{d?.revpar_ytd != null ? fmtRate(d.revpar_ytd) : '—'}</td>
+          <td className={`${cell} ${adrColor(d?.adr_ytd ?? null)}`}>
+            <ClickableValue value={d?.adr_ytd ?? null} formatted={d?.adr_ytd != null ? fmtRate(d.adr_ytd) : '—'} />
+          </td>
+          <td className={`${cell} ${revparColor(d?.revpar_ytd ?? null)}`}>
+            <ClickableValue value={d?.revpar_ytd ?? null} formatted={d?.revpar_ytd != null ? fmtRate(d.revpar_ytd) : '—'} />
+          </td>
           <td className={`${cell} ${revenueColor(d?.revenue_ytd ?? null)}`}>
             <ClickableValue value={d?.revenue_ytd ?? null} formatted={d?.revenue_ytd != null ? fmtCurrency(d.revenue_ytd) : '—'} />
           </td>

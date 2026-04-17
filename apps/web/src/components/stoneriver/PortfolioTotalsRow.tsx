@@ -111,7 +111,7 @@ export function SubtotalRow({ rows, label, showDay = true, showMtd = true, showY
 
   return (
     <tr className="bg-[#f3f4f6] border-b border-[#d1d5db]">
-      <td className="px-2 py-1 text-[11px] font-bold text-[#374151] sticky left-0 bg-[#f3f4f6] z-[5] border-r border-[#e5e5e5] whitespace-nowrap">
+      <td className="px-2 py-1 text-[11px] font-bold text-[#374151] bg-[#f3f4f6] border-r border-[#e5e5e5] whitespace-nowrap">
         {label ?? 'Subtotal'}
       </td>
       <TotalCells t={t} showDay={showDay} showMtd={showMtd} showYtd={showYtd} />
@@ -126,7 +126,7 @@ export function GrandTotalRow({ rows, showDay = true, showMtd = true, showYtd = 
 
   return (
     <tr className="bg-[#e5e7eb] border-t-2 border-[#374151] font-bold">
-      <td className="px-2 py-1.5 text-[11px] font-bold text-[#111827] sticky left-0 bg-[#e5e7eb] z-[5] border-r border-[#d1d5db] whitespace-nowrap">
+      <td className="px-2 py-1.5 text-[11px] font-bold text-[#111827] bg-[#e5e7eb] border-r border-[#d1d5db] whitespace-nowrap">
         TOTAL: All Properties
       </td>
       <TotalCells t={t} showDay={showDay} showMtd={showMtd} showYtd={showYtd} />
