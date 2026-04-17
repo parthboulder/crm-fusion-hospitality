@@ -26,7 +26,43 @@ export async function adminRoutes(app: FastifyInstance) {
 
     if (error) throw error;
 
-    return reply.send({ success: true, data: users });
+    // Aggregate active session counts per user. Supabase doesn't support a
+    // grouped count in a single query, so do one count call and bucket by id.
+    const userIds = (users ?? []).map((u) => u.id as string);
+    const sessionCounts = new Map<string, number>();
+    if (userIds.length > 0) {
+      const { data: sessions, error: sessErr } = await supabase
+        .from('user_sessions')
+        .select('user_id')
+        .in('user_id', userIds)
+        .eq('is_active', true)
+        .gt('expires_at', new Date().toISOString());
+      if (sessErr) {
+        app.log.warn({ err: sessErr.message }, 'admin_users.session_count_failed');
+      } else {
+        for (const s of sessions ?? []) {
+          const uid = (s as { user_id: string }).user_id;
+          sessionCounts.set(uid, (sessionCounts.get(uid) ?? 0) + 1);
+        }
+      }
+    }
+
+    // Reshape to camelCase keys the frontend expects.
+    const reshaped = (users ?? []).map((u) => {
+      const r = (u as { role?: { name?: string; display_name?: string } }).role;
+      return {
+        id: u.id,
+        email: u.email,
+        fullName: u.full_name,
+        isActive: u.is_active,
+        mfaEnabled: u.mfa_enabled,
+        lastLoginAt: u.last_login_at,
+        role: r ? { name: r.name ?? '', displayName: r.display_name ?? r.name ?? '' } : null,
+        _count: { sessions: sessionCounts.get(u.id as string) ?? 0 },
+      };
+    });
+
+    return reply.send({ success: true, data: reshaped });
   });
 
   // ─── POST /users — invite new user ────────────────────────────────────────
@@ -284,9 +320,52 @@ export async function adminRoutes(app: FastifyInstance) {
 
       const total = countResult.count ?? 0;
 
+      // Resolve user emails in one batched query so the Audit tab can show
+      // "alice@example.com" instead of a UUID slice. For failed login attempts
+      // there's no user_id — fall back to the email recorded in after_value.
+      const userIds = Array.from(
+        new Set(
+          (listResult.data ?? [])
+            .map((r) => (r as Record<string, unknown>)['user_id'] as string | null)
+            .filter((v): v is string => !!v),
+        ),
+      );
+      const emailById = new Map<string, string>();
+      if (userIds.length > 0) {
+        const { data: profs } = await supabase
+          .from('user_profiles')
+          .select('id, email')
+          .in('id', userIds);
+        for (const p of profs ?? []) {
+          emailById.set(p.id as string, p.email as string);
+        }
+      }
+
+      // Reshape to the camelCase shape the AuditTab expects.
+      const reshaped = (listResult.data ?? []).map((r) => {
+        const row = r as Record<string, unknown>;
+        const userId = (row['user_id'] as string | null) ?? null;
+        const after = (row['after_value'] as Record<string, unknown> | null) ?? null;
+        const userEmail =
+          (userId ? emailById.get(userId) : null) ??
+          ((after?.['email'] as string | undefined) ?? null);
+        return {
+          id: row['id'],
+          userId,
+          userEmail,
+          action: row['action'],
+          resourceType: row['resource_type'],
+          resourceId: (row['resource_id'] as string | null) ?? null,
+          result: row['result'],
+          failureReason: (row['failure_reason'] as string | null) ?? null,
+          ipAddress: (row['ip_address'] as string | null) ?? null,
+          createdAt: row['created_at'],
+        };
+      });
+
       return reply.send({
         success: true,
-        data: listResult.data,
+        data: reshaped,
         total,
         page: query.page,
         limit: query.limit,
@@ -316,7 +395,35 @@ export async function adminRoutes(app: FastifyInstance) {
 
       if (error) throw error;
 
-      return reply.send({ success: true, data: roles });
+      // Count users per role so the Roles tab can show "N users".
+      const roleIds = (roles ?? []).map((r) => r.id as string);
+      const userCounts = new Map<string, number>();
+      if (roleIds.length > 0) {
+        const { data: profs, error: profErr } = await supabase
+          .from('user_profiles')
+          .select('role_id')
+          .in('role_id', roleIds)
+          .eq('is_active', true);
+        if (profErr) {
+          app.log.warn({ err: profErr.message }, 'admin_roles.user_count_failed');
+        } else {
+          for (const p of profs ?? []) {
+            const rid = (p as { role_id: string }).role_id;
+            userCounts.set(rid, (userCounts.get(rid) ?? 0) + 1);
+          }
+        }
+      }
+
+      // Reshape: camelCase + the keys the frontend expects.
+      const reshaped = (roles ?? []).map((r) => ({
+        id: r.id,
+        name: r.name,
+        displayName: r.display_name,
+        rolePermissions: (r as { role_permissions?: unknown[] }).role_permissions ?? [],
+        _count: { userProfiles: userCounts.get(r.id as string) ?? 0 },
+      }));
+
+      return reply.send({ success: true, data: reshaped });
     },
   );
 }

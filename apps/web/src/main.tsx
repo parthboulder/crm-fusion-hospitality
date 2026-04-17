@@ -5,13 +5,6 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import App from './App';
 import './index.css';
 
-// In mock mode, seed the auth store so the login screen is skipped.
-if (import.meta.env['VITE_MOCK'] === 'true') {
-  const { MOCK_USER } = await import('./lib/mock-data');
-  const { useAuthStore } = await import('./store/auth.store');
-  useAuthStore.getState().setUser(MOCK_USER);
-}
-
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

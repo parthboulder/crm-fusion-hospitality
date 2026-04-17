@@ -24,9 +24,14 @@ import {
   ArrowDownTrayIcon,
   ClockIcon,
   CpuChipIcon,
+  ChevronUpIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  FunnelIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
-import { xhrUpload, UploadError } from '../lib/xhr-upload';
+import { useUploadStore } from '../store/upload.store';
+import { UploadProgressCard as SharedUploadProgressCard } from '../components/upload/UploadProgressCard';
 
 type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -43,7 +48,24 @@ interface OcrJob {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  // Classification fields — populated at upload (filename) and refined by
+  // the OCR worker (extracted text). May be null until migration 014 runs
+  // or for files the classifier couldn't identify.
+  property: string | null;
+  dateFolder: string | null;
+  reportType: string | null;
+  reportCategory: string | null;
 }
+
+interface OcrFacets {
+  properties: string[];
+  dates: string[];
+  reportTypes: string[];
+  categories: string[];
+}
+
+type SortField = 'originalName' | 'reportType' | 'reportCategory' | 'property' | 'fileSizeBytes' | 'createdAt';
+type SortDir = 'asc' | 'desc';
 
 interface OcrJobDetail extends OcrJob {
   extractedData: {
@@ -137,27 +159,6 @@ function StatusBadge({ status }: { status: JobStatus }) {
   );
 }
 
-const UPLOAD_CONCURRENCY = 2;
-
-type FileProgressStatus = 'pending' | 'uploading' | 'done' | 'error' | 'skipped' | 'cancelled';
-
-interface FileProgress {
-  id: number;           // local unique id — not the server jobId
-  name: string;
-  size: number;
-  status: FileProgressStatus;
-  bytesSent: number;    // for the current file
-  errorMessage?: string;
-}
-
-interface BatchState {
-  files: FileProgress[];
-  /** Aggregate bytes sent across the whole batch (all accepted files). */
-  totalBytes: number;
-  /** Total aggregate bytes. */
-  bytesSent: number;
-}
-
 type StatusFilter = 'all' | 'active' | 'completed' | 'failed';
 type ViewMode = 'list' | 'compact';
 
@@ -180,27 +181,43 @@ function exportJobsCsv(jobs: OcrJob[]) {
 export function OcrUploadsPage() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [uploadErrors, setUploadErrors] = useState<string[]>([]);
-  const [batch, setBatch] = useState<BatchState | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(true);
   const [fileTypeFilter, setFileTypeFilter] = useState('');
+  const [propertyFilter, setPropertyFilter] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [reportTypeFilter, setReportTypeFilter] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [sortField, setSortField] = useState<SortField>('createdAt');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [page, setPage] = useState(1);
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Upload state lives in a global store so progress survives navigation.
+  const batch = useUploadStore((s) => s.batch);
+  const uploadErrors = useUploadStore((s) => s.errors);
+  const startBatchInStore = useUploadStore((s) => s.startBatch);
+  const abortBatch = useUploadStore((s) => s.abortBatch);
+  const setUploadErrors = useUploadStore((s) => s.setErrors);
 
   // Build query params for the API
   const queryParams = (() => {
     const params = new URLSearchParams({ limit: String(JOBS_PER_PAGE), page: String(page) });
     if (statusFilter !== 'all' && statusFilter !== 'active') params.set('status', statusFilter);
     if (statusFilter === 'active') params.set('status', 'pending'); // active = pending + processing
+    if (propertyFilter)   params.set('property', propertyFilter);
+    if (dateFilter)       params.set('dateFolder', dateFilter);
+    if (reportTypeFilter) params.set('reportType', reportTypeFilter);
+    if (categoryFilter)   params.set('category', categoryFilter);
+    if (searchQuery.trim()) params.set('search', searchQuery.trim());
     return params.toString();
   })();
 
   const { data: listData, isLoading } = useQuery<{ data: OcrJob[]; total: number; totalPages: number }>({
-    queryKey: ['ocr-jobs', page, statusFilter],
+    queryKey: ['ocr-jobs', page, statusFilter, propertyFilter, dateFilter, reportTypeFilter, categoryFilter, searchQuery],
     queryFn: () => api.get(`/ocr/jobs?${queryParams}`),
     refetchInterval: (q) => {
       const list = q.state.data?.data ?? [];
@@ -208,6 +225,38 @@ export function OcrUploadsPage() {
     },
     refetchIntervalInBackground: false,
   });
+
+  // Facets — populated dropdown options across the WHOLE dataset (not just
+  // the current page). Refetched alongside the list so newly classified
+  // jobs appear in the dropdowns within ~30s.
+  const { data: facetsResp } = useQuery<{ data: OcrFacets }>({
+    queryKey: ['ocr-jobs-facets'],
+    queryFn: () => api.get('/ocr/jobs/facets'),
+    staleTime: 30_000,
+  });
+  const facets: OcrFacets = facetsResp?.data ?? { properties: [], dates: [], reportTypes: [], categories: [] };
+
+  const hasAnyFilter = !!(propertyFilter || dateFilter || reportTypeFilter || categoryFilter || searchQuery || fileTypeFilter || statusFilter !== 'all');
+
+  const clearAllFilters = () => {
+    setPropertyFilter('');
+    setDateFilter('');
+    setReportTypeFilter('');
+    setCategoryFilter('');
+    setFileTypeFilter('');
+    setSearchQuery('');
+    setStatusFilter('all');
+    setPage(1);
+  };
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDir('asc');
+    }
+  };
 
   const { data: detailResp } = useQuery<{ data: OcrJobDetail }>({
     queryKey: ['ocr-job', selectedId],
@@ -249,150 +298,15 @@ export function OcrUploadsPage() {
     },
   });
 
-  /**
-   * Uploads a batch with bounded concurrency (UPLOAD_CONCURRENCY parallel).
-   * Tracks bytes sent per file via XHR progress events; the overall progress
-   * bar is (sum bytesSent) / (sum totalBytes) across accepted files.
-   *
-   * Abortable: the user can hit Cancel to abort in-flight uploads and stop
-   * the queue. Files already on the server continue processing normally.
-   */
-  const uploadBatch = useCallback(async (rawFiles: File[]) => {
-    setUploadErrors([]);
-    if (rawFiles.length === 0) return;
-
-    // Split incoming into accepted + skipped, record skipped reasons.
-    const accepted: File[] = [];
-    const skipped: string[] = [];
-    for (const f of rawFiles) {
-      if (isAcceptedFile(f)) {
-        accepted.push(f);
-      } else {
-        const name = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-        skipped.push(`${name}: skipped (unsupported type or size)`);
-      }
-    }
-
-    if (accepted.length === 0) {
-      setUploadErrors(['No supported files found.', ...skipped.slice(0, 20)]);
-      return;
-    }
-
-    // Init batch state.
-    const initial: FileProgress[] = accepted.map((f, i) => ({
-      id: i,
-      name: (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name,
-      size: f.size,
-      status: 'pending',
-      bytesSent: 0,
-    }));
-    const totalBytes = accepted.reduce((s, f) => s + f.size, 0);
-    setBatch({ files: initial, totalBytes, bytesSent: 0 });
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Mutation helpers — update one file slice of the batch state.
-    const patchFile = (id: number, patch: Partial<FileProgress>) => {
-      setBatch((prev) => {
-        if (!prev) return prev;
-        const files = prev.files.map((f) => (f.id === id ? { ...f, ...patch } : f));
-        const bytesSent = files.reduce((s, f) => s + f.bytesSent, 0);
-        return { ...prev, files, bytesSent };
-      });
-    };
-
-    // Worker pool: N promises pulling from a shared index.
-    let nextIndex = 0;
-    let completedCount = 0;
-    const errs: string[] = [];
-
-    const worker = async () => {
-      while (true) {
-        if (controller.signal.aborted) return;
-        const i = nextIndex++;
-        if (i >= accepted.length) return;
-
-        const file = accepted[i]!;
-        const id = initial[i]!.id;
-        patchFile(id, { status: 'uploading', bytesSent: 0 });
-
-        const fd = new FormData();
-        fd.append('file', file);
-
-        try {
-          await xhrUpload<{ data: { jobId: string } }>('/api/v1/ocr/upload', fd, {
-            signal: controller.signal,
-            onProgress: (p) => {
-              // When lengthComputable is false, loaded == 1 (our sentinel for 100%).
-              const sent = p.total > 0 ? p.loaded : file.size;
-              patchFile(id, { bytesSent: Math.min(sent, file.size) });
-            },
-          });
-          patchFile(id, { status: 'done', bytesSent: file.size });
-        } catch (e) {
-          if (e instanceof UploadError && e.code === 'ABORTED') {
-            patchFile(id, { status: 'cancelled', bytesSent: 0 });
-            return; // stop this worker
-          }
-          if (e instanceof UploadError && e.code === 'DUPLICATE_FILE') {
-            // Not an error — the file already exists server-side. Mark as
-            // "skipped" so the user sees it didn't re-upload but also
-            // doesn't panic.
-            patchFile(id, { status: 'skipped', bytesSent: file.size });
-            errs.push(`${file.name}: ${e.message}`);
-            continue;
-          }
-          const msg =
-            e instanceof UploadError
-              ? `[${e.code}] ${e.message}`
-              : e instanceof Error
-                ? e.message
-                : 'Upload failed';
-          errs.push(`${file.name}: ${msg}`);
-          patchFile(id, { status: 'error', errorMessage: msg });
-          console.error('ocr upload failed', { file: file.name, error: e });
-        }
-
-        completedCount++;
-        // Refresh the list every few uploads so jobs appear progressively.
-        if (completedCount % 3 === 0) {
-          qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
-        }
-      }
-    };
-
-    const pool = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, accepted.length) }, () => worker());
-    await Promise.all(pool);
-
-    qc.invalidateQueries({ queryKey: ['ocr-jobs'] });
-
-    if (skipped.length > 0) {
-      errs.push(`${skipped.length} file(s) skipped (unsupported type or size).`);
-    }
-    setUploadErrors(errs);
-    abortRef.current = null;
-
-    // Auto-clear the batch card after a short delay if nothing errored.
-    // Keep it visible if there were errors or duplicates so the user sees
-    // what happened.
-    const hardErrors = errs.some((e) => !/duplicate/i.test(e));
-    if (!hardErrors && !controller.signal.aborted) {
-      setTimeout(
-        () =>
-          setBatch((b) =>
-            b && b.files.every((f) => f.status === 'done' || f.status === 'skipped')
-              ? null
-              : b,
-          ),
-        2500,
-      );
-    }
-  }, [qc]);
-
-  const abortBatch = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+  // Upload entry point — delegates to the global store so progress survives
+  // navigation. The store handles concurrency, abort, and auto-clear.
+  const uploadBatch = useCallback(
+    (rawFiles: File[]) =>
+      startBatchInStore(rawFiles, isAcceptedFile, () =>
+        qc.invalidateQueries({ queryKey: ['ocr-jobs'] }),
+      ),
+    [qc, startBatchInStore],
+  );
 
   // Stage files for preview instead of uploading immediately.
   const stageFiles = useCallback((files: File[]) => {
@@ -456,18 +370,36 @@ export function OcrUploadsPage() {
     [jobs, totalJobs, pageOffset],
   );
 
-  // Compute stats from current page data
-  const stats = useMemo(() => {
-    const all = jobs;
-    return {
-      total: listData?.total ?? all.length,
-      completed: all.filter((j) => j.status === 'completed').length,
-      failed: all.filter((j) => j.status === 'failed').length,
-      processing: all.filter((j) => j.status === 'processing').length,
-      pending: all.filter((j) => j.status === 'pending').length,
-      totalSize: all.reduce((s, j) => s + j.fileSizeBytes, 0),
+  // Stats come from the server-wide /storage-stats endpoint, not the current
+  // page. Otherwise "Completed: 20" would just count the visible page slice
+  // while total said 294, which looked broken.
+  const statsQuery = useQuery<{
+    success: boolean;
+    data: {
+      dbJobs: number;
+      dbBytes: number;
+      statusCounts: Record<string, number>;
     };
-  }, [jobs, listData]);
+  }>({
+    queryKey: ['ocr-storage-stats'],
+    queryFn: () => api.get('/ocr/jobs/storage-stats'),
+    staleTime: 15_000,
+  });
+
+  const stats = useMemo(() => {
+    const s = statsQuery.data?.data;
+    if (!s) {
+      return { total: 0, completed: 0, failed: 0, processing: 0, pending: 0, totalSize: 0 };
+    }
+    return {
+      total: s.dbJobs,
+      completed: s.statusCounts['completed'] ?? 0,
+      failed: s.statusCounts['failed'] ?? 0,
+      processing: s.statusCounts['processing'] ?? 0,
+      pending: s.statusCounts['pending'] ?? 0,
+      totalSize: s.dbBytes,
+    };
+  }, [statsQuery.data]);
 
   // Unique file types for the filter
   const fileTypes = useMemo(() => {
@@ -478,28 +410,63 @@ export function OcrUploadsPage() {
     return [...types].sort();
   }, [jobs]);
 
-  // Client-side search + file type filter
+  // Server-side filters (search, status, property, date, reportType, category)
+  // are already applied by the API. We layer client-side file-type filtering
+  // and sorting on top, since file type isn't a server filter and sorting
+  // operates only on the visible page anyway.
   const filteredJobs = useMemo(() => {
     let items = jobsWithSerial;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      items = items.filter(({ job }) => job.originalName.toLowerCase().includes(q));
-    }
     if (fileTypeFilter) {
       items = items.filter(({ job }) => job.originalName.toLowerCase().endsWith(`.${fileTypeFilter}`));
     }
+    if (sortField !== 'createdAt' || sortDir !== 'desc') {
+      // Default order from the API is createdAt desc; only re-sort if the
+      // user picked something else.
+      const dir = sortDir === 'asc' ? 1 : -1;
+      items = [...items].sort((a, b) => {
+        const av = a.job[sortField] ?? '';
+        const bv = b.job[sortField] ?? '';
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+        return String(av).localeCompare(String(bv)) * dir;
+      });
+    }
     return items;
-  }, [jobsWithSerial, searchQuery, fileTypeFilter]);
+  }, [jobsWithSerial, fileTypeFilter, sortField, sortDir]);
 
   return (
     <div className="flex h-full overflow-hidden">
+      {/* Collapsed rail — visible only when sidebar is closed */}
+      {!filtersOpen && (
+        <div className="w-9 shrink-0 border-r border-neutral-200 bg-white hidden lg:flex flex-col items-center pt-3">
+          <button
+            onClick={() => setFiltersOpen(true)}
+            className="p-1.5 rounded hover:bg-neutral-100 text-neutral-500 hover:text-neutral-700 transition-colors"
+            title="Show filters"
+          >
+            <FunnelIcon className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Left sidebar — filters */}
-      <div className="w-52 shrink-0 border-r border-neutral-200 bg-white overflow-y-auto hidden lg:block">
+      <div className={clsx(
+        'w-52 shrink-0 border-r border-neutral-200 bg-white overflow-y-auto',
+        filtersOpen ? 'hidden lg:block' : 'hidden',
+      )}>
         <div className="p-4">
-          <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-3">Filters</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">Filters</h2>
+            <button
+              onClick={() => setFiltersOpen(false)}
+              className="p-0.5 rounded hover:bg-neutral-100 text-neutral-400 hover:text-neutral-600 transition-colors"
+              title="Hide filters"
+            >
+              <ChevronLeftIcon className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           {/* File type filter */}
-          <div className="mb-4">
+          <div className="mb-3">
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">File Type</label>
             <select
               value={fileTypeFilter}
@@ -509,6 +476,66 @@ export function OcrUploadsPage() {
               <option value="">All types ({fileTypes.length})</option>
               {fileTypes.map((t) => (
                 <option key={t} value={t}>.{t}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Date filter */}
+          <div className="mb-3">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Date</label>
+            <select
+              value={dateFilter}
+              onChange={(e) => { setDateFilter(e.target.value); setPage(1); }}
+              className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="">All dates ({facets.dates.length})</option>
+              {facets.dates.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Property filter */}
+          <div className="mb-3">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Property</label>
+            <select
+              value={propertyFilter}
+              onChange={(e) => { setPropertyFilter(e.target.value); setPage(1); }}
+              className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="">All properties ({facets.properties.length})</option>
+              {facets.properties.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Category filter */}
+          <div className="mb-3">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Category</label>
+            <select
+              value={categoryFilter}
+              onChange={(e) => { setCategoryFilter(e.target.value); setPage(1); }}
+              className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="">All categories ({facets.categories.length})</option>
+              {facets.categories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Report Type filter */}
+          <div className="mb-4">
+            <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Report Type</label>
+            <select
+              value={reportTypeFilter}
+              onChange={(e) => { setReportTypeFilter(e.target.value); setPage(1); }}
+              className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="">All types ({facets.reportTypes.length})</option>
+              {facets.reportTypes.map((t) => (
+                <option key={t} value={t}>{t}</option>
               ))}
             </select>
           </div>
@@ -556,13 +583,13 @@ export function OcrUploadsPage() {
             Export CSV
           </button>
 
-          {(fileTypeFilter || searchQuery) && (
+          {hasAnyFilter && (
             <button
-              onClick={() => { setFileTypeFilter(''); setSearchQuery(''); }}
+              onClick={clearAllFilters}
               className="w-full flex items-center justify-center gap-1 px-2 py-1.5 mt-2 text-[10px] font-medium text-danger-600 bg-danger-50 rounded hover:bg-danger-100 transition-colors"
             >
               <XMarkIcon className="w-3 h-3" />
-              Clear filters
+              Clear all filters
             </button>
           )}
         </div>
@@ -719,7 +746,7 @@ export function OcrUploadsPage() {
             </div>
           )}
 
-          {batch && <UploadProgressCard batch={batch} onAbort={abortBatch} />}
+          {batch && <SharedUploadProgressCard batch={batch} onAbort={abortBatch} className="mt-3" />}
 
           {uploadErrors.length > 0 && (
             <div className="mt-3 rounded-md bg-danger-50 border border-danger-200 text-xs text-danger-700 overflow-hidden">
@@ -764,7 +791,7 @@ export function OcrUploadsPage() {
                   type="text"
                   placeholder="Search by filename..."
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
                   className="w-full pl-3 pr-8 py-2 text-sm border border-neutral-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-neutral-400"
                 />
                 {searchQuery && (
@@ -811,6 +838,39 @@ export function OcrUploadsPage() {
                   Failed
                 </FilterChip>
               </div>
+            </div>
+
+            {/* Active filter chips — clickable to clear individually */}
+            {(propertyFilter || dateFilter || reportTypeFilter || categoryFilter || fileTypeFilter) && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">Active:</span>
+                {propertyFilter && (
+                  <ActiveChip label={`Property: ${propertyFilter}`} onClear={() => { setPropertyFilter(''); setPage(1); }} />
+                )}
+                {dateFilter && (
+                  <ActiveChip label={`Date: ${dateFilter}`} onClear={() => { setDateFilter(''); setPage(1); }} />
+                )}
+                {categoryFilter && (
+                  <ActiveChip label={`Category: ${categoryFilter}`} onClear={() => { setCategoryFilter(''); setPage(1); }} />
+                )}
+                {reportTypeFilter && (
+                  <ActiveChip label={`Report: ${reportTypeFilter}`} onClear={() => { setReportTypeFilter(''); setPage(1); }} />
+                )}
+                {fileTypeFilter && (
+                  <ActiveChip label={`Type: .${fileTypeFilter}`} onClear={() => setFileTypeFilter('')} />
+                )}
+              </div>
+            )}
+
+            {/* Sort row */}
+            <div className="flex items-center gap-2 text-[11px] text-neutral-500">
+              <span className="font-semibold uppercase tracking-widest">Sort by:</span>
+              <SortBtn label="Uploaded"  active={sortField === 'createdAt'}      dir={sortDir} onClick={() => toggleSort('createdAt')} />
+              <SortBtn label="Name"       active={sortField === 'originalName'}   dir={sortDir} onClick={() => toggleSort('originalName')} />
+              <SortBtn label="Property"   active={sortField === 'property'}       dir={sortDir} onClick={() => toggleSort('property')} />
+              <SortBtn label="Report"     active={sortField === 'reportType'}     dir={sortDir} onClick={() => toggleSort('reportType')} />
+              <SortBtn label="Category"   active={sortField === 'reportCategory'} dir={sortDir} onClick={() => toggleSort('reportCategory')} />
+              <SortBtn label="Size"       active={sortField === 'fileSizeBytes'}  dir={sortDir} onClick={() => toggleSort('fileSizeBytes')} />
             </div>
           </div>
 
@@ -881,6 +941,26 @@ export function OcrUploadsPage() {
                       <p className="text-sm text-neutral-800 truncate font-medium">{job.originalName}</p>
                       <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                         <StatusBadge status={job.status} />
+                        {job.property && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+                            {job.property}
+                          </span>
+                        )}
+                        {job.reportType && job.reportType !== 'Unknown' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-medium">
+                            {job.reportType}
+                          </span>
+                        )}
+                        {job.reportCategory && job.reportCategory !== 'Uncategorized' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium">
+                            {job.reportCategory}
+                          </span>
+                        )}
+                        {job.dateFolder && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium tabular-nums">
+                            {job.dateFolder}
+                          </span>
+                        )}
                         <span className="text-[10px] text-neutral-400 tabular-nums">
                           {fmtSize(job.fileSizeBytes)}
                         </span>
@@ -1034,6 +1114,10 @@ export function OcrUploadsPage() {
             {detail && (
               <>
                 <dl className="space-y-1.5 text-xs mb-4">
+                  {detail.property &&        <Row label="Property"    value={detail.property} />}
+                  {detail.reportType &&      <Row label="Report Type" value={detail.reportType} />}
+                  {detail.reportCategory &&  <Row label="Category"    value={detail.reportCategory} />}
+                  {detail.dateFolder &&      <Row label="Date"        value={detail.dateFolder} />}
                   <Row label="Size" value={fmtSize(detail.fileSizeBytes)} />
                   <Row label="Type" value={detail.fileType} />
                   <Row label="Uploaded" value={fmtRelative(detail.createdAt)} />
@@ -1154,143 +1238,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-/**
- * Shows a two-level progress view for an in-flight upload batch:
- *   1. Aggregate bar (bytes-weighted) + overall counter
- *   2. Per-file mini-bars — capped at 6 visible rows to keep the card compact
- */
-function UploadProgressCard({
-  batch,
-  onAbort,
-}: {
-  batch: BatchState;
-  onAbort: () => void;
-}) {
-  const total = batch.files.length;
-  const done = batch.files.filter((f) => f.status === 'done').length;
-  const failed = batch.files.filter((f) => f.status === 'error').length;
-  const cancelled = batch.files.filter((f) => f.status === 'cancelled').length;
-  const skipped = batch.files.filter((f) => f.status === 'skipped').length;
-  const finished = done + failed + cancelled + skipped;
-  const inflight = batch.files.filter((f) => f.status === 'uploading');
-
-  const aggFraction = batch.totalBytes > 0
-    ? Math.min(1, batch.bytesSent / batch.totalBytes)
-    : finished / total;
-  const aggPct = Math.round(aggFraction * 100);
-  const allDone = finished === total;
-
-  // Show in-flight first, then the most recent N finished. Keeps the list
-  // bounded so 500-file folder uploads don't tank the DOM.
-  const visibleFiles = [
-    ...inflight,
-    ...batch.files.filter((f) => f.status !== 'uploading' && f.status !== 'pending').slice(-4),
-  ].slice(0, 6);
-
-  return (
-    <div className="mt-3 bg-white border border-neutral-200 rounded-lg overflow-hidden shadow-sm">
-      <div className="px-4 pt-3 pb-2.5">
-        <div className="flex items-center justify-between mb-2.5 gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            {allDone ? (
-              <CheckCircleIcon className="w-4 h-4 text-success-600 shrink-0" />
-            ) : (
-              <ArrowPathIcon className="w-4 h-4 text-brand-600 animate-spin shrink-0" />
-            )}
-            <span className="text-sm font-semibold text-neutral-900">
-              {allDone ? 'Upload complete' : 'Uploading files'}
-            </span>
-            <span className="text-[11px] text-neutral-500 tabular-nums">
-              {finished}/{total}
-              {failed > 0 && <span className="text-danger-600 font-medium"> · {failed} failed</span>}
-              {skipped > 0 && <span className="text-warning-700"> · {skipped} duplicate</span>}
-              {cancelled > 0 && <span className="text-neutral-500"> · {cancelled} cancelled</span>}
-            </span>
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <span className="text-sm font-semibold text-neutral-800 tabular-nums">{aggPct}%</span>
-            {!allDone && (
-              <button
-                onClick={onAbort}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-danger-700 hover:bg-danger-50 rounded transition-colors"
-                title="Cancel remaining uploads"
-              >
-                <StopCircleIcon className="w-3.5 h-3.5" />
-                Cancel
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Aggregate bar */}
-        <div className="h-2 bg-neutral-100 rounded-full overflow-hidden">
-          <div
-            className={clsx(
-              'h-full rounded-full transition-[width] duration-200',
-              allDone && failed === 0 ? 'bg-success-500' : failed > 0 ? 'bg-warning-500' : 'bg-brand-500',
-            )}
-            style={{ width: `${aggPct}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Per-file rows */}
-      {visibleFiles.length > 0 && (
-        <div className="border-t border-neutral-100 bg-neutral-50/40 px-4 py-2.5 space-y-1.5">
-          {visibleFiles.map((f) => {
-            const frac = f.size > 0 ? f.bytesSent / f.size : f.status === 'done' ? 1 : 0;
-            const pct = Math.round(Math.min(1, frac) * 100);
-            return (
-              <div key={f.id} className="flex items-center gap-2.5 text-[11px]">
-                <FileTypeGlyph filename={f.name} />
-                <span className="flex-1 min-w-0 truncate text-neutral-700" title={f.name}>
-                  {f.name}
-                </span>
-                <div className="w-24 h-1.5 bg-neutral-200 rounded-full overflow-hidden shrink-0">
-                  <div
-                    className={clsx(
-                      'h-full rounded-full transition-[width] duration-150',
-                      f.status === 'done' && 'bg-success-500',
-                      f.status === 'error' && 'bg-danger-500',
-                      f.status === 'cancelled' && 'bg-neutral-400',
-                      f.status === 'skipped' && 'bg-warning-400',
-                      f.status === 'uploading' && 'bg-brand-500',
-                      f.status === 'pending' && 'bg-transparent',
-                    )}
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <span
-                  className={clsx(
-                    'shrink-0 w-20 text-right tabular-nums text-[10px] font-medium',
-                    f.status === 'done' && 'text-success-600',
-                    f.status === 'error' && 'text-danger-600',
-                    f.status === 'cancelled' && 'text-neutral-500',
-                    f.status === 'skipped' && 'text-warning-700',
-                    f.status === 'uploading' && 'text-brand-600',
-                    f.status === 'pending' && 'text-neutral-400',
-                  )}
-                >
-                  {f.status === 'done' && 'Done'}
-                  {f.status === 'error' && 'Failed'}
-                  {f.status === 'cancelled' && 'Cancelled'}
-                  {f.status === 'skipped' && 'Duplicate'}
-                  {f.status === 'uploading' && `${pct}%`}
-                  {f.status === 'pending' && 'Queued'}
-                </span>
-              </div>
-            );
-          })}
-          {batch.files.length > visibleFiles.length && (
-            <p className="text-[10px] text-neutral-400 pt-1 pl-6">
-              + {batch.files.length - visibleFiles.length} more queued
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** Small icon derived from filename extension — used in job rows + progress rows. */
 function FileTypeGlyph({ filename }: { filename: string }) {
@@ -1330,6 +1277,50 @@ function FormatChip({ children }: { children: React.ReactNode }) {
     <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-600 text-[10px] font-medium">
       {children}
     </span>
+  );
+}
+
+function ActiveChip({ label, onClear }: { label: string; onClear: () => void }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 text-[11px] font-medium">
+      {label}
+      <button
+        onClick={onClear}
+        className="hover:bg-brand-100 rounded-full p-0.5 -mr-1 transition-colors"
+        aria-label={`Clear ${label}`}
+      >
+        <XMarkIcon className="w-3 h-3" />
+      </button>
+    </span>
+  );
+}
+
+function SortBtn({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={clsx(
+        'inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
+        active
+          ? 'bg-neutral-900 text-white'
+          : 'bg-white border border-neutral-200 text-neutral-600 hover:border-neutral-300 hover:text-neutral-800',
+      )}
+    >
+      {label}
+      {active && (dir === 'asc'
+        ? <ChevronUpIcon className="w-3 h-3" />
+        : <ChevronDownIcon className="w-3 h-3" />)}
+    </button>
   );
 }
 

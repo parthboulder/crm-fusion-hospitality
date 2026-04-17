@@ -64,12 +64,13 @@ export function StoneriverDashboardPage() {
         <Link to="/stoneriver" className="text-[#6b7280] hover:text-[#1a1a1a] transition-colors">
           <ArrowLeftIcon className="w-4 h-4" />
         </Link>
-        <div className="flex-1 min-w-0">
-          <h1 className="text-sm font-bold text-[#1a1a1a] tracking-tight">
+        <div className="shrink-0">
+          <h1 className="text-sm font-bold text-[#1a1a1a] tracking-tight whitespace-nowrap">
             Revenue Flash
             <span className="ml-2 text-[#2563eb]">{displayDate}</span>
           </h1>
         </div>
+        <div className="flex-1" />
 
         {/* Date picker */}
         <input

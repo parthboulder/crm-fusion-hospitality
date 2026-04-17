@@ -8,8 +8,9 @@ import { api } from '../lib/api-client';
 import { fmtDate, fmtRelative } from '../lib/formatters';
 import { useAuthStore } from '../store/auth.store';
 import { clsx } from 'clsx';
+import { StorageTab } from '../components/admin/StorageTab';
 
-type AdminTab = 'users' | 'roles' | 'audit';
+type AdminTab = 'users' | 'roles' | 'audit' | 'storage';
 
 interface User {
   id: string;
@@ -25,13 +26,26 @@ interface User {
 interface AuditLog {
   id: string;
   userId: string | null;
+  userEmail: string | null;
   action: string;
   resourceType: string;
   resourceId: string | null;
   result: string;
+  failureReason: string | null;
   ipAddress: string | null;
   createdAt: string;
 }
+
+// Pretty labels for the auth events users actually look at.
+const ACTION_LABELS: Record<string, string> = {
+  'auth.login.success': 'Logged in',
+  'auth.login.failed': 'Login failed',
+  'auth.logout': 'Logged out',
+  'auth.oauth.success': 'Microsoft sign-in',
+  'auth.oauth.failed': 'Microsoft sign-in failed',
+  'auth.oauth.autoprovisioned': 'Account auto-created',
+  'auth.mfa.failed': 'MFA failed',
+};
 
 export function AdminPage() {
   const { hasPermission } = useAuthStore();
@@ -53,7 +67,7 @@ export function AdminPage() {
       {/* Tabs */}
       <div className="border-b border-gray-100 mb-6">
         <nav className="flex gap-1">
-          {(['users', 'roles', 'audit'] as AdminTab[]).map((t) => (
+          {(['users', 'roles', 'audit', 'storage'] as AdminTab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -73,6 +87,7 @@ export function AdminPage() {
       {tab === 'users' && <UsersTab qc={qc} />}
       {tab === 'roles' && <RolesTab />}
       {tab === 'audit' && <AuditTab />}
+      {tab === 'storage' && <StorageTab />}
     </div>
   );
 }
@@ -116,14 +131,14 @@ function UsersTab({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                     <p className="font-medium text-gray-900">{user.fullName}</p>
                     <p className="text-xs text-gray-400">{user.email}</p>
                   </td>
-                  <td className="px-4 py-3 capitalize text-gray-600">{user.role.displayName}</td>
+                  <td className="px-4 py-3 capitalize text-gray-600">{user.role?.displayName ?? '—'}</td>
                   <td className="px-4 py-3">
                     <span className={clsx('text-xs font-medium', user.mfaEnabled ? 'text-success-600' : 'text-gray-300')}>
                       {user.mfaEnabled ? '✓ On' : 'Off'}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-400 tabular-nums">{fmtRelative(user.lastLoginAt)}</td>
-                  <td className="px-4 py-3 tabular-nums text-gray-600">{user._count.sessions}</td>
+                  <td className="px-4 py-3 tabular-nums text-gray-600">{user._count?.sessions ?? 0}</td>
                   <td className="px-4 py-3">
                     <span className={clsx('text-xs font-medium', user.isActive ? 'text-success-600' : 'text-gray-400')}>
                       {user.isActive ? 'Active' : 'Inactive'}
@@ -137,7 +152,7 @@ function UsersTab({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                       >
                         {user.isActive ? 'Deactivate' : 'Activate'}
                       </button>
-                      {user._count.sessions > 0 && (
+                      {(user._count?.sessions ?? 0) > 0 && (
                         <button
                           onClick={() => revokeMutation.mutate(user.id)}
                           className="text-xs text-danger-600 hover:text-danger-700 font-medium"
@@ -173,11 +188,11 @@ function RolesTab() {
             <div key={role.id} className="card p-4">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-sm font-semibold text-gray-900">{role.displayName}</p>
-                <span className="text-xs text-gray-400">{role._count.userProfiles} users</span>
+                <span className="text-xs text-gray-400">{role._count?.userProfiles ?? 0} users</span>
               </div>
               <p className="text-xs text-gray-400 font-mono">{role.name}</p>
               <p className="text-xs text-gray-300 mt-1">
-                {(role.rolePermissions as unknown[]).length} permissions
+                {((role.rolePermissions as unknown[] | undefined) ?? []).length} permissions
               </p>
             </div>
           ))}
@@ -197,7 +212,7 @@ function AuditTab() {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
         <input
           type="text"
           placeholder="Filter by action…"
@@ -205,7 +220,28 @@ function AuditTab() {
           onChange={(e) => setAction(e.target.value)}
           className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500 w-52"
         />
-        <span className="text-xs text-gray-400">{data?.total ?? 0} entries</span>
+        {/* Quick presets — saves typing for the most useful filters. */}
+        {[
+          { label: 'All', value: '' },
+          { label: 'Logins', value: 'auth.login' },
+          { label: 'Logouts', value: 'auth.logout' },
+          { label: 'OAuth', value: 'auth.oauth' },
+          { label: 'Failed', value: 'failed' },
+        ].map((p) => (
+          <button
+            key={p.label}
+            onClick={() => setAction(p.value)}
+            className={clsx(
+              'text-xs px-2.5 py-1.5 rounded-md border transition-colors',
+              action === p.value
+                ? 'bg-brand-50 border-brand-200 text-brand-700 font-medium'
+                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50',
+            )}
+          >
+            {p.label}
+          </button>
+        ))}
+        <span className="text-xs text-gray-400 ml-auto">{data?.total ?? 0} entries</span>
       </div>
 
       <div className="card overflow-hidden">
@@ -224,16 +260,26 @@ function AuditTab() {
                 ))
               : (data?.data ?? []).map((log) => (
                   <tr key={log.id} className="hover:bg-slate-25 text-xs">
-                    <td className="px-4 py-2.5 text-gray-700">{log.action}</td>
+                    <td className="px-4 py-2.5 text-gray-700 font-sans">
+                      {ACTION_LABELS[log.action] ?? log.action}
+                      {log.failureReason && (
+                        <span className="ml-1 text-gray-400">· {log.failureReason}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 text-gray-500">{log.resourceType}{log.resourceId ? ` · ${log.resourceId.slice(0, 8)}` : ''}</td>
-                    <td className="px-4 py-2.5 text-gray-400">{log.userId?.slice(0, 8) ?? '—'}</td>
+                    <td className="px-4 py-2.5 text-gray-700 font-sans">
+                      {log.userEmail ?? (log.userId ? log.userId.slice(0, 8) : '—')}
+                    </td>
                     <td className="px-4 py-2.5 text-gray-300">{log.ipAddress ?? '—'}</td>
                     <td className="px-4 py-2.5">
                       <span className={clsx('font-medium', log.result === 'success' ? 'text-success-600' : 'text-danger-600')}>
                         {log.result}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 text-gray-300 tabular-nums">{fmtRelative(log.createdAt)}</td>
+                    <td className="px-4 py-2.5 text-gray-500 tabular-nums whitespace-nowrap">
+                      {log.createdAt ? new Date(log.createdAt).toLocaleString() : '—'}
+                      <span className="ml-2 text-gray-300">({fmtRelative(log.createdAt)})</span>
+                    </td>
                   </tr>
                 ))}
           </tbody>

@@ -12,6 +12,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { processFile, extractFinancialData, TesseractWorkerPool } from '../lib/ocr/index.js';
 import { ingestOcrResult } from '../lib/report-parsers.js';
+import { classifyFromContent } from '../lib/report-classifier.js';
 import { env } from '../config/env.js';
 
 interface WorkerHandle {
@@ -211,14 +212,39 @@ export function startOcrWorker(log: FastifyBaseLogger): WorkerHandle {
         fullTextPreview: ocrResult.fullText.slice(0, 4000),
       };
 
-      const { error: completeErr } = await supabase
+      // Re-classify with the extracted text — far more accurate than the
+      // filename-only guess made at upload time.
+      const refined = classifyFromContent(job.originalName, ocrResult.fullText);
+
+      const completePayload: Record<string, unknown> = {
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        extracted_data: extractedData,
+        property: refined.property,
+        date_folder: refined.dateFolder,
+        report_type: refined.reportType,
+        report_category: refined.category,
+      };
+
+      let { error: completeErr } = await supabase
         .from('ocr_jobs')
-        .update({
-          status: 'completed',
-          completed_at: new Date().toISOString(),
-          extracted_data: extractedData,
-        })
+        .update(completePayload)
         .eq('id', job.id);
+
+      // Migration 014 not yet applied — retry without classification fields
+      // so the OCR pipeline still completes successfully.
+      if (completeErr && /column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(completeErr.message)) {
+        log.warn({ err: completeErr.message, jobId: job.id }, 'ocr_classification_columns_missing_skipping');
+        const retry = await supabase
+          .from('ocr_jobs')
+          .update({
+            status: 'completed',
+            completed_at: completePayload.completed_at,
+            extracted_data: extractedData,
+          })
+          .eq('id', job.id);
+        completeErr = retry.error;
+      }
 
       if (completeErr) {
         throw new Error(`Persist failed: ${completeErr.message}`);

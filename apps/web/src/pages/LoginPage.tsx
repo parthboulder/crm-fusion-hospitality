@@ -39,27 +39,6 @@ export function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
 
-  function handleDemoLogin() {
-    setUser({
-      id: 'demo-user-001',
-      email: 'demo@nightaudit.com',
-      fullName: 'Demo User',
-      role: 'super_admin',
-      orgId: 'org-demo-001',
-      permissions: [
-        'properties:read', 'properties:write', 'properties:delete',
-        'reports:read', 'reports:upload', 'reports:review', 'reports:delete', 'reports:download',
-        'metrics:read', 'metrics:override', 'metrics:approve',
-        'financials:read',
-        'alerts:read', 'alerts:acknowledge', 'alerts:resolve',
-        'tasks:read', 'tasks:create', 'tasks:assign', 'tasks:complete',
-        'admin:users', 'admin:roles', 'admin:audit', 'admin:sessions', 'admin:properties',
-        'ai:summaries',
-      ],
-    });
-    navigate('/dashboard');
-  }
-
   async function handleMicrosoftLogin() {
     setError('');
     setOauthLoading(true);
@@ -230,24 +209,6 @@ export function LoginPage() {
             </button>
           </form>
 
-          <div className="relative my-5">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-200" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-white px-2 text-gray-400">demo</span>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleDemoLogin}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium
-                       text-brand-700 bg-brand-50 border border-brand-200 rounded-lg
-                       hover:bg-brand-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
-          >
-            Enter as Demo User
-          </button>
         </div>
 
         <p className="text-center text-xs text-gray-400 mt-6">

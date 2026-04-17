@@ -12,7 +12,9 @@ import { env } from '../../config/env.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8),
+  // Min 6 to allow short admin passwords during initial setup. Tighten to 8+
+  // before going wider — short passwords are not safe for production users.
+  password: z.string().min(6),
   mfaCode: z.string().optional(),
 });
 
@@ -195,6 +197,9 @@ export async function authRoutes(app: FastifyInstance) {
         action: 'auth.login.success',
         resourceType: 'auth',
         resourceId: user.id,
+        actorUserId: user.id,
+        actorOrgId: user.org_id,
+        afterValue: { email: user.email },
       });
 
       await supabase
@@ -256,7 +261,7 @@ export async function authRoutes(app: FastifyInstance) {
       const oauthEmail = supaUser.user.email.toLowerCase();
 
       // Match against existing user profile.
-      const { data: user, error: userError } = await supabase
+      let { data: user, error: userError } = await supabase
         .from('user_profiles')
         .select('*, roles(*)')
         .eq('email', oauthEmail)
@@ -272,21 +277,73 @@ export async function authRoutes(app: FastifyInstance) {
         });
       }
 
+      // Auto-provision on first Microsoft sign-in. The default role is
+      // super_admin within the single org for now — tighten this once the
+      // tenant story is real (per-domain mapping, invite flow, etc.).
       if (!user) {
+        const fullName =
+          (supaUser.user.user_metadata?.['full_name'] as string | undefined) ??
+          (supaUser.user.user_metadata?.['name'] as string | undefined) ??
+          oauthEmail.split('@')[0];
+
+        // Pick the first org and its super_admin role (only one org exists today).
+        const { data: org, error: orgErr } = await supabase
+          .from('organizations')
+          .select('id')
+          .limit(1)
+          .maybeSingle();
+        if (orgErr || !org) {
+          req.log.error({ err: orgErr?.message }, 'oauth_autoprovision.no_org');
+          return reply.code(500).send({
+            success: false,
+            error: { code: 'INTERNAL_ERROR', message: 'No organization configured.' },
+          });
+        }
+
+        const { data: defaultRole, error: roleErr } = await supabase
+          .from('roles')
+          .select('id')
+          .eq('org_id', org.id)
+          .eq('name', 'super_admin')
+          .limit(1)
+          .maybeSingle();
+        if (roleErr || !defaultRole) {
+          req.log.error({ err: roleErr?.message }, 'oauth_autoprovision.no_default_role');
+          return reply.code(500).send({
+            success: false,
+            error: { code: 'INTERNAL_ERROR', message: 'No default role configured.' },
+          });
+        }
+
+        const { data: created, error: createErr } = await supabase
+          .from('user_profiles')
+          .insert({
+            id: supaUser.user.id, // share PK with auth.users
+            org_id: org.id,
+            email: oauthEmail,
+            full_name: fullName,
+            role_id: defaultRole.id,
+            is_active: true,
+          })
+          .select('*, roles(*)')
+          .single();
+
+        if (createErr || !created) {
+          req.log.error({ err: createErr?.message }, 'oauth_autoprovision.insert_failed');
+          return reply.code(500).send({
+            success: false,
+            error: { code: 'INTERNAL_ERROR', message: 'Failed to provision account.' },
+          });
+        }
+
         await app.audit(req, {
-          action: 'auth.oauth.failed',
-          resourceType: 'auth',
-          result: 'failure',
-          failureReason: 'user_not_found',
-          afterValue: { email: oauthEmail },
+          action: 'auth.oauth.autoprovisioned',
+          resourceType: 'user',
+          resourceId: created.id,
+          afterValue: { email: oauthEmail, role: 'super_admin' },
         });
-        return reply.code(403).send({
-          success: false,
-          error: {
-            code: 'USER_NOT_PROVISIONED',
-            message: 'No account found for this Microsoft account. Contact your administrator.',
-          },
-        });
+
+        user = created;
       }
 
       // Enforce concurrent session limit.
@@ -360,7 +417,9 @@ export async function authRoutes(app: FastifyInstance) {
         action: 'auth.oauth.success',
         resourceType: 'auth',
         resourceId: user.id,
-        afterValue: { provider: 'azure' },
+        actorUserId: user.id,
+        actorOrgId: user.org_id,
+        afterValue: { provider: 'azure', email: user.email },
       });
 
       await supabase
@@ -404,7 +463,19 @@ export async function authRoutes(app: FastifyInstance) {
         .update({ is_active: false, revoked_at: new Date().toISOString() })
         .eq('id', req.authUser.sessionId);
 
-      await app.audit(req, { action: 'auth.logout', resourceType: 'auth' });
+      // Look up the email so the audit row carries it inline — saves the
+      // Audit tab a second join when the user is later deleted.
+      const { data: prof } = await supabase
+        .from('user_profiles')
+        .select('email')
+        .eq('id', req.authUser.id)
+        .maybeSingle();
+      await app.audit(req, {
+        action: 'auth.logout',
+        resourceType: 'auth',
+        resourceId: req.authUser.id,
+        afterValue: { email: prof?.email },
+      });
 
       reply.clearCookie('session_token', { path: '/' });
       return reply.send({ success: true, data: { message: 'Logged out.' } });

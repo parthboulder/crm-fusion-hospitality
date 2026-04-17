@@ -4,6 +4,7 @@
 
 import { Outlet } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
+import { GlobalUploadCard } from '../upload/GlobalUploadCard';
 
 export function AppShell() {
   return (
@@ -12,6 +13,7 @@ export function AppShell() {
       <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
+      <GlobalUploadCard />
     </div>
   );
 }

@@ -17,6 +17,11 @@ export interface AuditEntry {
   afterValue?: unknown;
   result?: 'success' | 'failure';
   failureReason?: string;
+  // Override the actor when req.authUser isn't set yet (e.g. login success
+  // is logged before the auth middleware ever ran). For most calls leave
+  // these blank — the plugin reads from req.authUser.
+  actorUserId?: string;
+  actorOrgId?: string;
 }
 
 export const auditPlugin = fp(async (app: FastifyInstance) => {
@@ -29,8 +34,8 @@ export const auditPlugin = fp(async (app: FastifyInstance) => {
       const { error } = await supabase
         .from('audit_logs')
         .insert({
-          org_id: user?.orgId ?? null,
-          user_id: user?.id ?? null,
+          org_id: entry.actorOrgId ?? user?.orgId ?? null,
+          user_id: entry.actorUserId ?? user?.id ?? null,
           session_id: user?.sessionId ?? null,
           action: entry.action,
           resource_type: entry.resourceType,

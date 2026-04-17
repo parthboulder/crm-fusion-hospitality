@@ -87,8 +87,11 @@ export function xhrUpload<T>(
     });
 
     if (options.signal) {
+      // If already aborted before send, reject immediately. Calling xhr.abort()
+      // on an OPENED (not yet sent) XHR doesn't dispatch the 'abort' event,
+      // so the promise would otherwise hang forever.
       if (options.signal.aborted) {
-        xhr.abort();
+        reject(new UploadError('ABORTED', 'Upload cancelled', 0));
         return;
       }
       options.signal.addEventListener('abort', () => xhr.abort(), { once: true });

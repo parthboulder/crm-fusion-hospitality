@@ -6,6 +6,8 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -63,6 +65,14 @@ await app.register(multipart, {
   // This prevents a single request from buffering hundreds of MB into memory.
   limits: { fileSize: 50 * 1024 * 1024 },
 });
+
+await app.register(swagger, {
+  openapi: {
+    info: { title: 'Fusion CRM API', version: '1.0.0' },
+    servers: [{ url: `http://localhost:${env.API_PORT}` }],
+  },
+});
+await app.register(swaggerUi, { routePrefix: '/docs' });
 
 await app.register(securityHeadersPlugin);
 await app.register(rateLimiterPlugin);
