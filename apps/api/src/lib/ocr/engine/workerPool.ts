@@ -82,7 +82,8 @@ export class TesseractWorkerPool {
       throw new Error('WorkerPool not initialized. Call initialize() first.');
     }
 
-    const result = await this.scheduler.addJob('recognize', imageBuffer);
+    const buf = Buffer.isBuffer(imageBuffer) ? imageBuffer : Buffer.from(imageBuffer);
+    const result = await this.scheduler.addJob('recognize', buf);
 
     return {
       text: result.data.text,
@@ -102,7 +103,10 @@ export class TesseractWorkerPool {
     }
 
     const jobs = imageBuffers.map((buf) =>
-      this.scheduler.addJob('recognize', buf)
+      this.scheduler.addJob(
+        'recognize',
+        Buffer.isBuffer(buf) ? buf : Buffer.from(buf)
+      )
     );
 
     const results = await Promise.all(jobs);
