@@ -48,6 +48,8 @@ data/
 OneDrive_*/
 OneDrive_*.zip
 *.png
+# Allow logos / brand assets shipped with the web app.
+!apps/web/public/*.png
 
 # Dev env files
 apps/web/.env.development
