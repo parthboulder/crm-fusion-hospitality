@@ -3,7 +3,7 @@
  * Independent from DocumentsPage (which reads pre-scanned OneDrive output).
  */
 
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import { clsx } from 'clsx';
@@ -27,6 +27,7 @@ import {
   ChevronUpIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   FunnelIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
@@ -164,6 +165,18 @@ type ViewMode = 'list' | 'compact';
 
 const JOBS_PER_PAGE = 20;
 
+function buildPageRange(current: number, total: number): (number | '…')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages: (number | '…')[] = [1];
+  const left = Math.max(2, current - 1);
+  const right = Math.min(total - 1, current + 1);
+  if (left > 2) pages.push('…');
+  for (let i = left; i <= right; i++) pages.push(i);
+  if (right < total - 1) pages.push('…');
+  pages.push(total);
+  return pages;
+}
+
 function exportJobsCsv(jobs: OcrJob[]) {
   const header = 'Name,Status,Type,Size (bytes),Created,Completed\n';
   const rows = jobs.map((j) =>
@@ -183,7 +196,7 @@ export function OcrUploadsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [fileTypeFilter, setFileTypeFilter] = useState('');
   const [propertyFilter, setPropertyFilter] = useState('');
   const [dateFilter, setDateFilter] = useState('');
@@ -194,7 +207,30 @@ export function OcrUploadsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [page, setPage] = useState(1);
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Shrink the sticky jobs header once the user scrolls past the dropzone.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => setIsScrolled(el.scrollTop > 80);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Live API connectivity check — lights up the status dot in the page header.
+  const { data: apiHealth, isError: apiHealthError } = useQuery<{ status: string }>({
+    queryKey: ['api-health'],
+    queryFn: () => api.get<{ status: string }>('/health'),
+    refetchInterval: 15_000,
+    retry: 1,
+    staleTime: 10_000,
+  });
+  const apiConnected = !apiHealthError && apiHealth?.status === 'ok';
 
   // Upload state lives in a global store so progress survives navigation.
   const batch = useUploadStore((s) => s.batch);
@@ -628,9 +664,20 @@ export function OcrUploadsPage() {
                 Compact
               </button>
             </div>
-            <span className="hidden md:inline-flex items-center gap-1 text-[11px] text-neutral-500">
-              <span className="w-1.5 h-1.5 rounded-full bg-success-500" />
-              API connected
+            <span
+              className={clsx(
+                'hidden md:inline-flex items-center gap-1.5 text-[11px]',
+                apiConnected ? 'text-neutral-500' : 'text-danger-600',
+              )}
+              title={apiConnected ? 'API health check passing' : 'API health check failed — requests may not succeed'}
+            >
+              <span
+                className={clsx(
+                  'w-1.5 h-1.5 rounded-full',
+                  apiConnected ? 'bg-success-500' : 'bg-danger-500 animate-pulse',
+                )}
+              />
+              {apiConnected ? 'API connected' : 'API offline'}
             </span>
           </div>
         </div>
@@ -644,8 +691,10 @@ export function OcrUploadsPage() {
           {stats.failed > 0 && <StatPill icon={<ExclamationCircleIcon className="w-3.5 h-3.5 text-danger-600" />} label="Failed" value={stats.failed} />}
         </div>
 
+        {/* Scrollable content — dropzone, upload cards, and jobs list share one scroll */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {/* Dropzone */}
-        <div className="px-6 pt-5 shrink-0">
+        <div className="px-6 pt-5">
           <div
             {...getRootProps()}
             className={clsx(
@@ -748,51 +797,121 @@ export function OcrUploadsPage() {
 
           {batch && <SharedUploadProgressCard batch={batch} onAbort={abortBatch} className="mt-3" />}
 
-          {uploadErrors.length > 0 && (
-            <div className="mt-3 rounded-md bg-danger-50 border border-danger-200 text-xs text-danger-700 overflow-hidden">
-              <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-danger-200/60 bg-danger-100/40">
-                <span className="font-semibold flex items-center gap-1.5">
-                  <ExclamationCircleIcon className="w-3.5 h-3.5" />
-                  {uploadErrors.length} error{uploadErrors.length === 1 ? '' : 's'}
-                </span>
-                <button
-                  onClick={() => setUploadErrors([])}
-                  className="text-danger-500 hover:text-danger-700 shrink-0 p-0.5 hover:bg-danger-100 rounded transition-colors"
-                  aria-label="Dismiss errors"
-                >
-                  <XMarkIcon className="w-3 h-3" />
-                </button>
+          {uploadErrors.length > 0 && (() => {
+            const isDup = (e: string) => /duplicate|already uploaded/i.test(e);
+            const duplicates = uploadErrors.filter(isDup);
+            const hardErrors = uploadErrors.filter((e) => !isDup(e));
+            const duplicateNames = duplicates.map((e) => {
+              const idx = e.indexOf(':');
+              return idx > -1 ? e.slice(0, idx) : e;
+            });
+            return (
+              <div className="mt-3 space-y-2">
+                {duplicates.length > 0 && (
+                  <div className="rounded-md bg-warning-50 border border-warning-200 text-xs text-warning-800 overflow-hidden">
+                    <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-warning-200/60 bg-warning-100/40">
+                      <span className="font-semibold flex items-center gap-1.5">
+                        <ExclamationCircleIcon className="w-3.5 h-3.5" />
+                        {duplicates.length} duplicate{duplicates.length === 1 ? '' : 's'}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setDuplicatesOpen((v) => !v)}
+                          className="text-warning-700 hover:text-warning-900 shrink-0 px-1.5 py-0.5 hover:bg-warning-100 rounded transition-colors inline-flex items-center gap-1"
+                          aria-expanded={duplicatesOpen}
+                          aria-label={duplicatesOpen ? 'Hide duplicate files' : 'Show duplicate files'}
+                        >
+                          {duplicatesOpen ? 'Hide' : 'Show files'}
+                          {duplicatesOpen
+                            ? <ChevronUpIcon className="w-3 h-3" />
+                            : <ChevronDownIcon className="w-3 h-3" />}
+                        </button>
+                        <button
+                          onClick={() => setUploadErrors(hardErrors)}
+                          className="text-warning-600 hover:text-warning-800 shrink-0 p-0.5 hover:bg-warning-100 rounded transition-colors"
+                          aria-label="Dismiss duplicates"
+                        >
+                          <XMarkIcon className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                    {duplicatesOpen && (
+                      <div className="px-3 py-2 space-y-0.5 max-h-40 overflow-y-auto">
+                        {duplicateNames.map((name, i) => (
+                          <div key={i} className="break-words flex items-center gap-1.5">
+                            <DocumentTextIcon className="w-3 h-3 shrink-0 text-warning-600" />
+                            <span className="truncate" title={name}>{name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {hardErrors.length > 0 && (
+                  <div className="rounded-md bg-danger-50 border border-danger-200 text-xs text-danger-700 overflow-hidden">
+                    <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-danger-200/60 bg-danger-100/40">
+                      <span className="font-semibold flex items-center gap-1.5">
+                        <ExclamationCircleIcon className="w-3.5 h-3.5" />
+                        {hardErrors.length} error{hardErrors.length === 1 ? '' : 's'}
+                      </span>
+                      <button
+                        onClick={() => setUploadErrors(duplicates)}
+                        className="text-danger-500 hover:text-danger-700 shrink-0 p-0.5 hover:bg-danger-100 rounded transition-colors"
+                        aria-label="Dismiss errors"
+                      >
+                        <XMarkIcon className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <div className="px-3 py-2 space-y-0.5 max-h-40 overflow-y-auto">
+                      {hardErrors.map((e, i) => <div key={i} className="break-words">{e}</div>)}
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="px-3 py-2 space-y-0.5 max-h-40 overflow-y-auto">
-                {uploadErrors.map((e, i) => <div key={i} className="break-words">{e}</div>)}
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Jobs list */}
-        <div className="flex-1 overflow-y-auto px-6 py-5">
-          <div className="mb-4 space-y-3">
-            {/* Title + count */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-semibold text-neutral-900">Jobs</h2>
-                <span className="text-sm text-neutral-400 tabular-nums">
-                  {listData?.total ?? jobs.length} total
-                </span>
+        <div className="px-6 pb-5 relative">
+          <div className={clsx(
+            'sticky top-0 z-10 bg-neutral-50 -mx-6 px-6 border-b border-neutral-200 transition-all',
+            isScrolled
+              ? 'mb-3 pt-2 pb-2 shadow-sm'
+              : 'mb-4 space-y-3 pt-4 pb-3',
+          )}>
+            {/* Title + count — hidden once scrolled to save vertical space */}
+            {!isScrolled && (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-semibold text-neutral-900">Jobs</h2>
+                  <span className="text-sm text-neutral-400 tabular-nums">
+                    {listData?.total ?? jobs.length} total
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Search + status filters */}
-            <div className="flex items-center gap-3 flex-wrap">
+            {/* Search + status filters + pager — single row when scrolled */}
+            <div className={clsx(
+              'flex items-center gap-2',
+              isScrolled ? 'flex-nowrap' : 'flex-wrap gap-3',
+            )}>
               {/* Search bar */}
-              <div className="relative flex-1 min-w-[200px] max-w-sm">
+              <div className={clsx(
+                'relative flex-1 min-w-0',
+                isScrolled ? 'max-w-[240px]' : 'min-w-[200px] max-w-sm',
+              )}>
                 <input
                   type="text"
                   placeholder="Search by filename..."
                   value={searchQuery}
                   onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
-                  className="w-full pl-3 pr-8 py-2 text-sm border border-neutral-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-neutral-400"
+                  className={clsx(
+                    'w-full pl-3 pr-8 border border-neutral-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-neutral-400',
+                    isScrolled ? 'py-1 text-xs' : 'py-2 text-sm',
+                  )}
                 />
                 {searchQuery && (
                   <button
@@ -805,7 +924,7 @@ export function OcrUploadsPage() {
               </div>
 
               {/* Status filter chips — count shows for the active filter only */}
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 shrink-0">
                 <FilterChip
                   active={statusFilter === 'all'}
                   onClick={() => { setStatusFilter('all'); setPage(1); }}
@@ -838,10 +957,42 @@ export function OcrUploadsPage() {
                   Failed
                 </FilterChip>
               </div>
+
+              {/* Pager — always on same row as search/filters when scrolled */}
+              {isScrolled && (listData?.totalPages ?? 1) > 1 && (
+                <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                  <span className="text-[11px] text-neutral-500 tabular-nums hidden sm:inline">
+                    {(() => {
+                      const total = listData?.total ?? 0;
+                      const top = total === 0 ? 0 : total - (page - 1) * JOBS_PER_PAGE;
+                      const bottom = Math.max(1, total - page * JOBS_PER_PAGE + 1);
+                      return `${top}–${bottom} of ${total}`;
+                    })()}
+                  </span>
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className="inline-flex items-center gap-0.5 px-1.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeftIcon className="w-3.5 h-3.5" />
+                    Prev
+                  </button>
+                  <button
+                    onClick={() => setPage((p) => Math.min(listData?.totalPages ?? 1, p + 1))}
+                    disabled={page >= (listData?.totalPages ?? 1)}
+                    className="inline-flex items-center gap-0.5 px-1.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Next page"
+                  >
+                    Next
+                    <ChevronRightIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* Active filter chips — clickable to clear individually */}
-            {(propertyFilter || dateFilter || reportTypeFilter || categoryFilter || fileTypeFilter) && (
+            {/* Active filter chips — clickable to clear individually (hidden when scrolled) */}
+            {!isScrolled && (propertyFilter || dateFilter || reportTypeFilter || categoryFilter || fileTypeFilter) && (
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">Active:</span>
                 {propertyFilter && (
@@ -862,16 +1013,49 @@ export function OcrUploadsPage() {
               </div>
             )}
 
-            {/* Sort row */}
-            <div className="flex items-center gap-2 text-[11px] text-neutral-500">
-              <span className="font-semibold uppercase tracking-widest">Sort by:</span>
-              <SortBtn label="Uploaded"  active={sortField === 'createdAt'}      dir={sortDir} onClick={() => toggleSort('createdAt')} />
-              <SortBtn label="Name"       active={sortField === 'originalName'}   dir={sortDir} onClick={() => toggleSort('originalName')} />
-              <SortBtn label="Property"   active={sortField === 'property'}       dir={sortDir} onClick={() => toggleSort('property')} />
-              <SortBtn label="Report"     active={sortField === 'reportType'}     dir={sortDir} onClick={() => toggleSort('reportType')} />
-              <SortBtn label="Category"   active={sortField === 'reportCategory'} dir={sortDir} onClick={() => toggleSort('reportCategory')} />
-              <SortBtn label="Size"       active={sortField === 'fileSizeBytes'}  dir={sortDir} onClick={() => toggleSort('fileSizeBytes')} />
-            </div>
+            {/* Sort row + pager (full, unscrolled state only) */}
+            {!isScrolled && (
+              <div className="flex items-center gap-2 text-[11px] text-neutral-500">
+                <span className="font-semibold uppercase tracking-widest">Sort by:</span>
+                <SortBtn label="Uploaded"  active={sortField === 'createdAt'}      dir={sortDir} onClick={() => toggleSort('createdAt')} />
+                <SortBtn label="Name"       active={sortField === 'originalName'}   dir={sortDir} onClick={() => toggleSort('originalName')} />
+                <SortBtn label="Property"   active={sortField === 'property'}       dir={sortDir} onClick={() => toggleSort('property')} />
+                <SortBtn label="Report"     active={sortField === 'reportType'}     dir={sortDir} onClick={() => toggleSort('reportType')} />
+                <SortBtn label="Category"   active={sortField === 'reportCategory'} dir={sortDir} onClick={() => toggleSort('reportCategory')} />
+                <SortBtn label="Size"       active={sortField === 'fileSizeBytes'}  dir={sortDir} onClick={() => toggleSort('fileSizeBytes')} />
+
+                {(listData?.totalPages ?? 1) > 1 && (
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <span className="text-[11px] text-neutral-500 tabular-nums">
+                      {(() => {
+                        const total = listData?.total ?? 0;
+                        const top = total === 0 ? 0 : total - (page - 1) * JOBS_PER_PAGE;
+                        const bottom = Math.max(1, total - page * JOBS_PER_PAGE + 1);
+                        return `${top}–${bottom} of ${total}`;
+                      })()}
+                    </span>
+                    <button
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page <= 1}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeftIcon className="w-3.5 h-3.5" />
+                      Prev
+                    </button>
+                    <button
+                      onClick={() => setPage((p) => Math.min(listData?.totalPages ?? 1, p + 1))}
+                      disabled={page >= (listData?.totalPages ?? 1)}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      aria-label="Next page"
+                    >
+                      Next
+                      <ChevronRightIcon className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {isLoading ? (
@@ -1028,29 +1212,62 @@ export function OcrUploadsPage() {
           )}
 
           {/* Pagination */}
-          {(listData?.totalPages ?? 1) > 1 && (
-            <div className="mt-5 flex items-center justify-between">
-              <span className="text-sm text-neutral-600">
-                Page <span className="font-semibold">{page}</span> of <span className="font-semibold">{listData?.totalPages ?? 1}</span> · {listData?.total ?? 0} jobs total
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}
-                  className="px-4 py-2 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  Previous
-                </button>
-                <button
-                  onClick={() => setPage((p) => Math.min(listData?.totalPages ?? 1, p + 1))}
-                  disabled={page >= (listData?.totalPages ?? 1)}
-                  className="px-4 py-2 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  Next
-                </button>
-              </div>
-            </div>
-          )}
+          {(listData?.totalPages ?? 1) > 1 && (() => {
+            const totalPages = listData?.totalPages ?? 1;
+            const total = listData?.total ?? 0;
+            const top = total === 0 ? 0 : total - (page - 1) * JOBS_PER_PAGE;
+            const bottom = Math.max(1, total - page * JOBS_PER_PAGE + 1);
+            const pageNumbers = buildPageRange(page, totalPages);
+            return (
+              <nav className="mt-6 flex items-center justify-between" aria-label="Jobs pagination">
+                <span className="text-sm text-neutral-600 tabular-nums">
+                  Showing <span className="font-semibold text-neutral-900">{top}</span>–<span className="font-semibold text-neutral-900">{bottom}</span> of <span className="font-semibold text-neutral-900">{total.toLocaleString()}</span>
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeftIcon className="w-4 h-4" />
+                    Previous
+                  </button>
+                  <div className="flex items-center gap-1 mx-1">
+                    {pageNumbers.map((p, i) =>
+                      p === '…' ? (
+                        <span key={`ellipsis-${i}`} className="px-2 text-neutral-400 select-none">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          onClick={() => setPage(p)}
+                          aria-current={p === page ? 'page' : undefined}
+                          className={clsx(
+                            'min-w-[34px] px-2 py-1.5 text-sm font-medium rounded-md transition-colors tabular-nums',
+                            p === page
+                              ? 'bg-neutral-900 text-white'
+                              : 'text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-50',
+                          )}
+                        >
+                          {p}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Next page"
+                  >
+                    Next
+                    <ChevronRightIcon className="w-4 h-4" />
+                  </button>
+                </div>
+              </nav>
+            );
+          })()}
+        </div>
         </div>
       </div>
 

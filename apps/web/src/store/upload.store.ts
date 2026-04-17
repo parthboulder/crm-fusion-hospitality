@@ -170,7 +170,7 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
     }
     set({ errors: errs, _abort: null });
 
-    const hardErrors = errs.some((e) => !/duplicate/i.test(e));
+    const hardErrors = errs.some((e) => !/duplicate|already uploaded/i.test(e));
     if (!hardErrors && !controller.signal.aborted) {
       setTimeout(() => {
         const cur = get().batch;

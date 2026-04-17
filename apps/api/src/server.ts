@@ -98,10 +98,13 @@ await app.register(performanceRoutes, { prefix: '/api/v1/performance' });
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
-app.get('/health', { logLevel: 'silent' }, async () => ({
+const healthHandler = async () => ({
   status: 'ok',
   ts: new Date().toISOString(),
-}));
+});
+
+app.get('/health', { logLevel: 'silent' }, healthHandler);
+app.get('/api/v1/health', { logLevel: 'silent' }, healthHandler);
 
 // ─── Static File Serving (production) ────────────────────────────────────────
 // In production the same Node process serves the built React SPA alongside
