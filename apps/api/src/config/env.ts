@@ -29,8 +29,8 @@ const schema = z.object({
   SIGNED_URL_EXPIRY_SECONDS: z.coerce.number().default(900),
 
   OCR_MAX_FILE_SIZE_BYTES: z.coerce.number().default(20 * 1024 * 1024),
-  OCR_WORKER_INTERVAL_MS: z.coerce.number().default(7_000),
-  OCR_WORKER_CONCURRENCY: z.coerce.number().default(2),
+  OCR_WORKER_INTERVAL_MS: z.coerce.number().default(2_000),
+  OCR_WORKER_CONCURRENCY: z.coerce.number().default(10),
   OCR_WORKER_MAX_RETRIES: z.coerce.number().default(2),
   OCR_WORKER_ENABLED: z.coerce.boolean().default(true),
   NVIDIA_API_KEY: z.string().optional(),

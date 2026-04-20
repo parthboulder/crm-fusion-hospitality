@@ -11,7 +11,12 @@
 import { create } from 'zustand';
 import { xhrUpload, UploadError } from '../lib/xhr-upload';
 
-const UPLOAD_CONCURRENCY = 2;
+// Browser caps HTTP/1.1 at ~6 concurrent requests per origin — anything
+// above that queues at the browser layer but still wins on HTTP/2 where
+// streams are multiplexed over one connection. 10 is a pragmatic ceiling
+// that keeps the upload pipeline saturated without over-subscribing the
+// Fastify process (which also has to run the OCR worker in-process).
+const UPLOAD_CONCURRENCY = 10;
 
 export type FileProgressStatus =
   | 'pending'
@@ -165,7 +170,10 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
         }
 
         completedCount++;
-        if (completedCount % 3 === 0) onJobsRefresh();
+        // Refresh the jobs list every 10 completions instead of every 3 —
+        // each refresh shares the browser's per-origin connection budget
+        // with the in-flight uploads, so frequent polling slows the batch.
+        if (completedCount % 10 === 0) onJobsRefresh();
       }
     };
 
