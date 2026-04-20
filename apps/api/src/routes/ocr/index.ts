@@ -165,6 +165,38 @@ function isAllowedUpload(mimetype: string, filename: string): boolean {
   return !!ext && ALLOWED_EXTENSIONS.has(ext);
 }
 
+// Extension → canonical MIME. Used when the browser sends
+// application/octet-stream or something generic that the Supabase bucket's
+// allow-list would reject. Keep in sync with ALLOWED_MIME.
+const EXT_TO_MIME: Record<string, string> = {
+  pdf:  'application/pdf',
+  png:  'image/png',
+  jpg:  'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  tiff: 'image/tiff',
+  tif:  'image/tiff',
+  bmp:  'image/bmp',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xls:  'application/vnd.ms-excel',
+  ods:  'application/vnd.oasis.opendocument.spreadsheet',
+  csv:  'text/csv',
+  tsv:  'text/tab-separated-values',
+};
+
+/**
+ * Pick the MIME the Supabase bucket will accept. Browsers occasionally send
+ * application/octet-stream for .ods/.xls/.tsv — that type isn't in the
+ * bucket allow-list, so we fall back to the extension mapping instead of
+ * letting the upload fail.
+ */
+function canonicalMimeFor(mimetype: string, filename: string): string {
+  if ((ALLOWED_MIME as readonly string[]).includes(mimetype)) return mimetype;
+  const ext = getSafeExtension(filename);
+  if (ext && EXT_TO_MIME[ext]) return EXT_TO_MIME[ext]!;
+  return mimetype;
+}
+
 /**
  * Returns the lowercased extension of a filename, or null if it isn't in the
  * allow-list. Guards against path-traversal style inputs like
@@ -384,10 +416,11 @@ export async function ocrRoutes(app: FastifyInstance) {
     const storagePath = `anon/${Date.now()}-${randomUUID()}.${safeExt}`;
     const displayName = sanitizeDisplayName(data.filename);
 
+    const storageMime = canonicalMimeFor(data.mimetype, data.filename);
     const { error: uploadError } = await supabase.storage
       .from(env.STORAGE_BUCKET_OCR)
       .upload(storagePath, buffer, {
-        contentType: data.mimetype,
+        contentType: storageMime,
         upsert: false,
       });
 
@@ -418,7 +451,10 @@ export async function ocrRoutes(app: FastifyInstance) {
     const insertPayload: Record<string, unknown> = {
       original_name: displayName,
       storage_path: storagePath,
-      file_type: data.mimetype,
+      // Store the canonical MIME so the worker doesn't have to re-infer from
+      // the filename, and so file_type stays consistent with whatever the
+      // bucket ultimately accepted.
+      file_type: storageMime,
       file_size_bytes: buffer.byteLength,
       status: 'pending',
       priority,

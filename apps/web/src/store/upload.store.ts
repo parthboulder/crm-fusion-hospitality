@@ -93,10 +93,19 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
       _abort: controller,
     });
 
+    // Refuse to modify a file once it's been cancelled — abortBatch() flips
+    // every pending/uploading file to 'cancelled' and the in-flight worker
+    // coroutines might race with it (progress callback firing after abort,
+    // done-handler running before the cancellation propagates). Without
+    // this guard, cancelled rows briefly flash and then revert.
     const patchFile = (id: number, patch: Partial<FileProgress>) => {
       const prev = get().batch;
       if (!prev) return;
-      const files = prev.files.map((f) => (f.id === id ? { ...f, ...patch } : f));
+      const files = prev.files.map((f) => {
+        if (f.id !== id) return f;
+        if (f.status === 'cancelled') return f; // sticky after cancel
+        return { ...f, ...patch };
+      });
       const bytesSent = files.reduce((s, f) => s + f.bytesSent, 0);
       set({ batch: { ...prev, files, bytesSent } });
     };
@@ -113,6 +122,7 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
 
         const file = accepted[i]!;
         const id = initial[i]!.id;
+        if (controller.signal.aborted) return;
         patchFile(id, { status: 'uploading', bytesSent: 0 });
 
         const fd = new FormData();
@@ -125,11 +135,13 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
             {
               signal: controller.signal,
               onProgress: (p) => {
+                if (controller.signal.aborted) return;
                 const sent = p.total > 0 ? p.loaded : file.size;
                 patchFile(id, { bytesSent: Math.min(sent, file.size) });
               },
             },
           );
+          if (controller.signal.aborted) return;
           patchFile(id, { status: 'done', bytesSent: file.size });
         } catch (e) {
           if (e instanceof UploadError && e.code === 'ABORTED') {

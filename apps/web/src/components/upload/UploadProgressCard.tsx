@@ -48,10 +48,14 @@ export function UploadProgressCard({
   const finished = done + failed + cancelled + skipped;
   const inflight = batch.files.filter((f) => f.status === 'uploading');
 
-  const aggFraction =
-    batch.totalBytes > 0
-      ? Math.min(1, batch.bytesSent / batch.totalBytes)
-      : finished / total;
+  // Byte-based fraction normally; fall back to finished-count when bytes
+  // aren't informative (no totalBytes, or a cancelled run where bytesSent
+  // was zeroed out). Either way cap at finished/total so the bar reaches
+  // 100% when every file reached a terminal state — including cancelled.
+  const byteFraction =
+    batch.totalBytes > 0 ? Math.min(1, batch.bytesSent / batch.totalBytes) : 0;
+  const countFraction = total > 0 ? finished / total : 0;
+  const aggFraction = Math.max(byteFraction, countFraction);
   const aggPct = Math.round(aggFraction * 100);
   const allDone = finished === total;
 
@@ -68,12 +72,20 @@ export function UploadProgressCard({
         <div className="flex items-center justify-between mb-2.5 gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {allDone ? (
-              <CheckCircleIcon className="w-4 h-4 text-success-600 shrink-0" />
+              cancelled > 0 && done === 0 && failed === 0 ? (
+                <StopCircleIcon className="w-4 h-4 text-neutral-500 shrink-0" />
+              ) : (
+                <CheckCircleIcon className="w-4 h-4 text-success-600 shrink-0" />
+              )
             ) : (
               <ArrowPathIcon className="w-4 h-4 text-brand-600 animate-spin shrink-0" />
             )}
             <span className="text-sm font-semibold text-neutral-900">
-              {allDone ? 'Upload complete' : 'Uploading files'}
+              {allDone
+                ? cancelled > 0 && done === 0 && failed === 0
+                  ? 'Upload cancelled'
+                  : 'Upload complete'
+                : 'Uploading files'}
             </span>
             <span className="text-[11px] text-neutral-500 tabular-nums">
               {finished}/{total}
@@ -158,11 +170,22 @@ export function UploadProgressCard({
               </div>
             );
           })}
-          {batch.files.length > visibleFiles.length && (
-            <p className="text-[10px] text-neutral-400 pt-1 pl-6">
-              + {batch.files.length - visibleFiles.length} more queued
-            </p>
-          )}
+          {(() => {
+            // Queued = files that haven't started yet (status='pending') and
+            // aren't already shown in visibleFiles. Earlier this subtracted
+            // the visible slice from the WHOLE batch, so it counted finished
+            // files as queued and never went down as the queue drained.
+            const visibleIds = new Set(visibleFiles.map((f) => f.id));
+            const stillQueued = batch.files.filter(
+              (f) => f.status === 'pending' && !visibleIds.has(f.id),
+            ).length;
+            if (stillQueued === 0) return null;
+            return (
+              <p className="text-[10px] text-neutral-400 pt-1 pl-6">
+                + {stillQueued} more queued
+              </p>
+            );
+          })()}
         </div>
       )}
     </div>
