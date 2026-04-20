@@ -6,7 +6,7 @@
  */
 
 import { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import {
   MagnifyingGlassIcon,
@@ -17,6 +17,7 @@ import {
   XMarkIcon,
   EyeIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
 import { SinglePdfViewer } from '../components/common/SinglePdfViewer';
@@ -58,7 +59,19 @@ interface JobDetailResponse {
   };
 }
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 20;
+
+function buildPageRange(current: number, total: number): (number | '…')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages: (number | '…')[] = [1];
+  const left = Math.max(2, current - 1);
+  const right = Math.min(total - 1, current + 1);
+  if (left > 2) pages.push('…');
+  for (let i = left; i <= right; i++) pages.push(i);
+  if (right < total - 1) pages.push('…');
+  pages.push(total);
+  return pages;
+}
 
 function fmtFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -92,6 +105,7 @@ export function DocumentsPage() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [previewJob, setPreviewJob] = useState<{ id: string; name: string; url: string } | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [page, setPage] = useState(1);
 
   function openPreview(job: OcrJob) {
     // Same-origin proxy — instant, no signed-URL round-trip.
@@ -108,7 +122,10 @@ export function DocumentsPage() {
   const allJobsQuery = useQuery<JobsResponse>({
     queryKey: ['ocr-jobs-documents-all'],
     queryFn: () => api.get<JobsResponse>('/ocr/jobs/persisted?limit=5000&page=1'),
-    staleTime: 5 * 60_000,
+    // Facets drive the filter dropdowns — refresh on focus so new property
+    // / date options appear after uploads, but don't poll (5k-row scan).
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   const facets = useMemo(() => {
@@ -136,7 +153,7 @@ export function DocumentsPage() {
   // means the dropdowns drive the API instead of post-filtering in the
   // browser. Lets us paginate and keep the page snappy with thousands of rows.
   const jobsParams = (() => {
-    const p = new URLSearchParams({ limit: String(PAGE_SIZE), page: '1' });
+    const p = new URLSearchParams({ limit: String(PAGE_SIZE), page: String(page) });
     if (selectedProperty) p.set('property', selectedProperty);
     if (selectedCategory) p.set('category', selectedCategory);
     if (selectedDate) p.set('dateFolder', selectedDate);
@@ -148,11 +165,19 @@ export function DocumentsPage() {
   const jobsQuery = useQuery<JobsResponse>({
     queryKey: ['ocr-jobs-documents', jobsParams],
     queryFn: () => api.get<JobsResponse>(`/ocr/jobs/persisted?${jobsParams}`),
-    staleTime: 30_000,
+    placeholderData: keepPreviousData,
+    // Idle poll — 30s. Cross-page mutations surface within half a minute,
+    // and refetchOnWindowFocus gives instant updates when the tab regains
+    // focus. Background tabs don't poll.
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    staleTime: 10_000,
   });
 
   const jobs = jobsQuery.data?.data ?? [];
   const total = jobsQuery.data?.total ?? 0;
+  const totalPages = jobsQuery.data?.totalPages ?? 1;
   const snapshotGeneratedAt = jobsQuery.data?.snapshotGeneratedAt ?? null;
 
   // Archived rows have no DB row to fetch — we render the summary we already
@@ -192,6 +217,7 @@ export function DocumentsPage() {
     setSelectedDate('');
     setSelectedReportType('');
     setSearch('');
+    setPage(1);
   };
 
   // For live rows: detail from API. For archived: synthesize a minimal
@@ -256,7 +282,7 @@ export function DocumentsPage() {
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Date</label>
             <select
               value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
+              onChange={(e) => { setSelectedDate(e.target.value); setPage(1); }}
               className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             >
               <option value="">All dates ({facets?.dates.length ?? 0})</option>
@@ -270,7 +296,7 @@ export function DocumentsPage() {
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Property</label>
             <select
               value={selectedProperty}
-              onChange={(e) => setSelectedProperty(e.target.value)}
+              onChange={(e) => { setSelectedProperty(e.target.value); setPage(1); }}
               className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             >
               <option value="">All properties ({facets?.properties.length ?? 0})</option>
@@ -284,7 +310,7 @@ export function DocumentsPage() {
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Category</label>
             <select
               value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
+              onChange={(e) => { setSelectedCategory(e.target.value); setPage(1); }}
               className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             >
               <option value="">All categories ({facets?.categories.length ?? 0})</option>
@@ -298,7 +324,7 @@ export function DocumentsPage() {
             <label className="text-[10px] font-semibold text-neutral-500 uppercase tracking-widest mb-1.5 block">Report Type</label>
             <select
               value={selectedReportType}
-              onChange={(e) => setSelectedReportType(e.target.value)}
+              onChange={(e) => { setSelectedReportType(e.target.value); setPage(1); }}
               className="w-full px-2 py-1.5 text-xs border border-neutral-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             >
               <option value="">All types ({facets?.reportTypes.length ?? 0})</option>
@@ -315,7 +341,7 @@ export function DocumentsPage() {
                 {reportTypesPreview.map(([type, count]) => (
                   <button
                     key={type}
-                    onClick={() => setSelectedReportType(type)}
+                    onClick={() => { setSelectedReportType(type); setPage(1); }}
                     className={clsx(
                       'w-full flex items-center justify-between px-2 py-1 rounded text-left transition-colors',
                       selectedReportType === type ? 'bg-brand-50' : 'hover:bg-neutral-50',
@@ -351,13 +377,10 @@ export function DocumentsPage() {
                 type="text"
                 placeholder="Search filenames..."
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
                 className="w-full pl-8 pr-3 py-1.5 text-sm border border-neutral-200 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500/20"
               />
             </div>
-            <span className="text-xs text-neutral-400 tabular-nums shrink-0">
-              {jobs.length} of {total} files
-            </span>
           </div>
           {snapshotGeneratedAt && (
             <p className="text-[10px] text-neutral-400 mt-1">
@@ -375,12 +398,21 @@ export function DocumentsPage() {
             </div>
           ) : jobs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16">
-              <FunnelIcon className="w-10 h-10 text-neutral-300 mb-2" />
-              <p className="text-sm text-neutral-500">No files match your filters</p>
+              {hasFilters ? (
+                <>
+                  <FunnelIcon className="w-10 h-10 text-neutral-300 mb-2" />
+                  <p className="text-sm text-neutral-500">No files match your filters</p>
+                </>
+              ) : (
+                <>
+                  <DocumentTextIcon className="w-10 h-10 text-neutral-300 mb-2" />
+                  <p className="text-sm text-neutral-500">No files found</p>
+                </>
+              )}
             </div>
           ) : (
             <div className="divide-y divide-neutral-100">
-              {jobs.map((j) => (
+              {jobs.map((j, i) => (
                 <div
                   key={j.id}
                   onClick={() => setSelectedJobId(j.id)}
@@ -389,6 +421,9 @@ export function DocumentsPage() {
                     selectedJobId === j.id && 'bg-brand-50 hover:bg-brand-50',
                   )}
                 >
+                  <span className="text-[11px] text-neutral-400 tabular-nums shrink-0 w-10 text-right select-none">
+                    {total - ((page - 1) * PAGE_SIZE + i)}
+                  </span>
                   <FileIcon name={j.originalName} />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-neutral-800 truncate">{j.originalName}</p>
@@ -443,6 +478,64 @@ export function DocumentsPage() {
             </div>
           )}
         </div>
+
+        {/* Pagination — same shape as OCR Uploads */}
+        {totalPages > 1 && (() => {
+          const top = total === 0 ? 0 : total - (page - 1) * PAGE_SIZE;
+          const bottom = Math.max(1, total - page * PAGE_SIZE + 1);
+          const pageNumbers = buildPageRange(page, totalPages);
+          return (
+            <nav
+              className="px-4 py-3 border-t border-neutral-200 bg-white flex items-center justify-between shrink-0"
+              aria-label="Documents pagination"
+            >
+              <span className="text-xs text-neutral-600 tabular-nums">
+                Showing <span className="font-semibold text-neutral-900">{top}</span>–<span className="font-semibold text-neutral-900">{bottom}</span> of <span className="font-semibold text-neutral-900">{total.toLocaleString()}</span>
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeftIcon className="w-3.5 h-3.5" />
+                  Previous
+                </button>
+                <div className="flex items-center gap-1 mx-1">
+                  {pageNumbers.map((p, i) =>
+                    p === '…' ? (
+                      <span key={`ellipsis-${i}`} className="px-1.5 text-neutral-400 select-none">…</span>
+                    ) : (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        aria-current={p === page ? 'page' : undefined}
+                        className={clsx(
+                          'min-w-[28px] px-2 py-1 text-xs font-medium rounded-md transition-colors tabular-nums',
+                          p === page
+                            ? 'bg-neutral-900 text-white'
+                            : 'text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-50',
+                        )}
+                      >
+                        {p}
+                      </button>
+                    ),
+                  )}
+                </div>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  aria-label="Next page"
+                >
+                  Next
+                  <ChevronRightIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </nav>
+          );
+        })()}
       </div>
 
       {/* Right panel — file detail */}

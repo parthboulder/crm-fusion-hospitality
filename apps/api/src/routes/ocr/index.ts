@@ -21,7 +21,8 @@ import path from 'node:path';
 import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../../config/env.js';
-import { classifyFromFilename } from '../../lib/report-classifier.js';
+import { classifyFromFilename, classifyFromContent } from '../../lib/report-classifier.js';
+import { reconcileDates, extractUniqueDates } from '../../lib/date-reconciler.js';
 
 // Server-side snapshot file. Documents page reads this so the UI keeps
 // showing data even after rows are bulk-deleted from ocr_jobs.
@@ -41,7 +42,9 @@ interface SnapshotJob {
   errorMessage: string | null;
   createdAt: string;
   completedAt: string | null;
-  archived: boolean; // true = no longer in DB, served from snapshot only
+  archived: boolean;          // true = no longer in DB (bulk-delete), served from snapshot only
+  deletedAt?: string | null;  // set only by single-file DELETE — the user intended to remove this file.
+                              // bulk-archive leaves this null so those rows remain visible on Documents.
 }
 
 interface SnapshotFile {
@@ -68,6 +71,63 @@ async function writeSnapshot(snap: SnapshotFile): Promise<void> {
   const { rename } = await import('node:fs/promises');
   await rename(tmp, SNAPSHOT_PATH);
 }
+
+
+/**
+ * Pull every live ocr_jobs row as a library-shaped record. Used by
+ * /jobs/persisted so the Documents page reflects the true DB state
+ * (new uploads appear, deleted rows disappear) without relying on a
+ * recently regenerated snapshot.
+ */
+async function fetchLiveJobsForLibrary(supabase: SupabaseClient): Promise<SnapshotJob[]> {
+  const PAGE = 1000;
+  const out: SnapshotJob[] = [];
+  let offset = 0;
+  // Try the classification-aware column list first; if 014 hasn't shipped,
+  // fall back to the narrow set so the library still works.
+  const wideCols =
+    'id, original_name, file_type, file_size_bytes, status, property, date_folder, report_type, report_category, error_message, created_at, completed_at';
+  const narrowCols =
+    'id, original_name, file_type, file_size_bytes, status, error_message, created_at, completed_at';
+
+  while (true) {
+    const runSelect = async (cols: string) => {
+      const res = await supabase
+        .from('ocr_jobs')
+        .select(cols)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + PAGE - 1);
+      return { data: res.data as unknown as Record<string, unknown>[] | null, error: res.error };
+    };
+    let { data, error } = await runSelect(wideCols);
+    if (error && /column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(error.message)) {
+      ({ data, error } = await runSelect(narrowCols));
+    }
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+    for (const r of data) {
+      out.push({
+        id: r['id'] as string,
+        originalName: r['original_name'] as string,
+        fileType: r['file_type'] as string,
+        fileSizeBytes: Number(r['file_size_bytes']),
+        status: r['status'] as string,
+        property: (r['property'] as string | null) ?? null,
+        dateFolder: (r['date_folder'] as string | null) ?? null,
+        reportType: (r['report_type'] as string | null) ?? null,
+        reportCategory: (r['report_category'] as string | null) ?? null,
+        errorMessage: (r['error_message'] as string | null) ?? null,
+        createdAt: r['created_at'] as string,
+        completedAt: (r['completed_at'] as string | null) ?? null,
+        archived: false,
+      });
+    }
+    if (data.length < PAGE) break;
+    offset += PAGE;
+  }
+  return out;
+}
+
 
 // Keep in sync with apps/api/src/workers/ocr-bucket-init.ts and the UI's
 // isAcceptedFile() in OcrUploadsPage.tsx. The OCR engine's spreadsheet
@@ -164,6 +224,14 @@ type OcrJobRow = {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+  property?: string | null;
+  date_folder?: string | null;
+  report_type?: string | null;
+  report_category?: string | null;
+  business_date?: string | null;
+  report_generated_at?: string | null;
+  filename_date?: string | null;
+  warnings?: unknown;
 };
 
 /**
@@ -201,6 +269,14 @@ function toCamel(job: OcrJobRow) {
     completedAt: job.completed_at,
     createdAt: job.created_at,
     updatedAt: job.updated_at,
+    property: job.property ?? null,
+    dateFolder: job.date_folder ?? null,
+    reportType: job.report_type ?? null,
+    reportCategory: job.report_category ?? null,
+    businessDate: job.business_date ?? null,
+    reportGeneratedAt: job.report_generated_at ?? null,
+    filenameDate: job.filename_date ?? null,
+    warnings: Array.isArray(job.warnings) ? job.warnings : [],
   };
 }
 
@@ -430,9 +506,17 @@ export async function ocrRoutes(app: FastifyInstance) {
 
   // ─── GET /jobs ────────────────────────────────────────────────────────────
   app.get('/jobs', async (req, reply) => {
+    const statusEnum = z.enum(['pending', 'processing', 'completed', 'failed']);
     const parsed = z
       .object({
-        status: z.enum(['pending', 'processing', 'completed', 'failed']).optional(),
+        // Accept either a single status or a comma-separated list (e.g.
+        // "pending,processing") so the UI's "active" filter can request both
+        // in one call.
+        status: z
+          .string()
+          .optional()
+          .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined))
+          .pipe(z.array(statusEnum).min(1).max(4).optional()),
         property: z.string().min(1).max(120).optional(),
         dateFolder: z.string().min(1).max(20).optional(),
         reportType: z.string().min(1).max(120).optional(),
@@ -458,6 +542,8 @@ export async function ocrRoutes(app: FastifyInstance) {
     // present yet (migration 014 not applied), fall back to the narrow set
     // and synthesize nulls. Same self-healing pattern as the upload route.
     const wideCols =
+      'id, original_name, file_type, file_size_bytes, status, priority, retry_count, error_message, started_at, completed_at, created_at, updated_at, property, date_folder, report_type, report_category, business_date, report_generated_at, filename_date, warnings';
+    const midCols =
       'id, original_name, file_type, file_size_bytes, status, priority, retry_count, error_message, started_at, completed_at, created_at, updated_at, property, date_folder, report_type, report_category';
     const narrowCols =
       'id, original_name, file_type, file_size_bytes, status, priority, retry_count, error_message, started_at, completed_at, created_at, updated_at';
@@ -468,7 +554,9 @@ export async function ocrRoutes(app: FastifyInstance) {
         .select(cols, { count: 'exact' })
         .order('created_at', { ascending: false })
         .range(from, to);
-      if (query.status) q = q.eq('status', query.status);
+      if (query.status && query.status.length > 0) {
+        q = query.status.length === 1 ? q.eq('status', query.status[0]) : q.in('status', query.status);
+      }
       if (query.property)   q = q.eq('property', query.property);
       if (query.dateFolder) q = q.eq('date_folder', query.dateFolder);
       if (query.reportType) q = q.eq('report_type', query.reportType);
@@ -479,9 +567,20 @@ export async function ocrRoutes(app: FastifyInstance) {
 
     let { data, error, count } = await buildQuery(wideCols);
     let classificationColumnsAvailable = true;
+    let businessDateColumnsAvailable = true;
+    // Migration 015 not yet applied — retry with just the 014 columns.
+    if (error && /column.*(business_date|report_generated_at|filename_date|warnings).*does not exist|42703/i.test(error.message)) {
+      app.log.warn({ err: error.message }, 'ocr_jobs_list_falling_back_no_business_date_cols');
+      businessDateColumnsAvailable = false;
+      const retry = await buildQuery(midCols);
+      data = retry.data;
+      error = retry.error;
+      count = retry.count;
+    }
     if (error && /column.*(property|date_folder|report_type|report_category).*does not exist|42703/i.test(error.message)) {
       app.log.warn({ err: error.message }, 'ocr_jobs_list_falling_back_no_classification_cols');
       classificationColumnsAvailable = false;
+      businessDateColumnsAvailable = false;
       const retry = await buildQuery(narrowCols);
       data = retry.data;
       error = retry.error;
@@ -513,6 +612,10 @@ export async function ocrRoutes(app: FastifyInstance) {
       dateFolder: classificationColumnsAvailable ? (r.date_folder as string | null) ?? null : null,
       reportType: classificationColumnsAvailable ? (r.report_type as string | null) ?? null : null,
       reportCategory: classificationColumnsAvailable ? (r.report_category as string | null) ?? null : null,
+      businessDate: businessDateColumnsAvailable ? (r.business_date as string | null) ?? null : null,
+      reportGeneratedAt: businessDateColumnsAvailable ? (r.report_generated_at as string | null) ?? null : null,
+      filenameDate: businessDateColumnsAvailable ? (r.filename_date as string | null) ?? null : null,
+      warnings: businessDateColumnsAvailable && Array.isArray(r.warnings) ? r.warnings : [],
     }));
 
     const total = count ?? rows.length;
@@ -785,6 +888,25 @@ export async function ocrRoutes(app: FastifyInstance) {
       });
     }
 
+    // Tombstone the file in the snapshot so Documents page stops showing it.
+    // Bulk-delete preserves rows as archived:true (intentional — frees DB but
+    // keeps the library). Single-file delete is an explicit "remove this"
+    // action, so we mark deletedAt and the /jobs/persisted read filters it.
+    try {
+      const snap = await readSnapshot();
+      if (snap) {
+        const now = new Date().toISOString();
+        const jobs = snap.jobs.map((j) =>
+          j.id === id ? { ...j, deletedAt: now, archived: true } : j,
+        );
+        await writeSnapshot({ ...snap, jobs, generatedAt: now });
+      }
+    } catch (e) {
+      // Non-fatal — the DB row is already gone. Worst case the operator
+      // sees a stale entry until the next snapshot regeneration.
+      app.log.warn({ err: (e as Error).message, id }, 'ocr_job_delete.snapshot_update_failed');
+    }
+
     return reply.send({ success: true, data: { id } });
   });
 
@@ -975,6 +1097,132 @@ export async function ocrRoutes(app: FastifyInstance) {
     return reply.send({ success: true, data: matches });
   });
 
+  // ─── POST /jobs/:id/reconcile-dates ──────────────────────────────────────
+  // One-off backfill for rows processed before migration 015 / before the
+  // date-reconciler shipped. Re-runs reconcileDates against the already-stored
+  // extracted_data.fullText and overwrites business_date / report_generated_at
+  // / filename_date / warnings. Safe to call repeatedly.
+  app.post('/jobs/:id/reconcile-dates', async (req, reply) => {
+    const id = parseJobId(req, reply);
+    if (!id) return;
+    const supabase = supabaseAdmin();
+
+    const { data: job, error } = await supabase
+      .from('ocr_jobs')
+      .select('id, original_name, extracted_data, report_type, report_category, date_folder')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) {
+      return reply.code(500).send({ success: false, error: { code: 'DB_ERROR', message: error.message } });
+    }
+    if (!job) {
+      return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Job not found.' } });
+    }
+
+    const extracted = job.extracted_data as { fullText?: string } | null;
+    const fullText = extracted?.fullText ?? '';
+    if (!fullText) {
+      return reply.code(409).send({
+        success: false,
+        error: { code: 'NO_TEXT', message: 'Job has no extracted text to reconcile against (retry the OCR first).' },
+      });
+    }
+
+    const category =
+      (job.report_category as string | null) ??
+      classifyFromContent(job.original_name as string, fullText).category;
+    const filenameDate =
+      (job.date_folder as string | null) ??
+      classifyFromContent(job.original_name as string, fullText).dateFolder;
+
+    const dates = reconcileDates({ filenameDate, fullText, category });
+    const uniqueDates = extractUniqueDates(fullText);
+
+    const nextExtracted = { ...(extracted ?? {}), uniqueDates };
+
+    const { error: updErr } = await supabase
+      .from('ocr_jobs')
+      .update({
+        business_date: dates.businessDate,
+        report_generated_at: dates.reportGeneratedAt,
+        filename_date: dates.filenameDate,
+        warnings: dates.warnings,
+        extracted_data: nextExtracted,
+      })
+      .eq('id', id);
+
+    if (updErr) {
+      return reply.code(500).send({ success: false, error: { code: 'DB_ERROR', message: updErr.message } });
+    }
+
+    return reply.send({
+      success: true,
+      data: {
+        id,
+        businessDate: dates.businessDate,
+        reportGeneratedAt: dates.reportGeneratedAt,
+        filenameDate: dates.filenameDate,
+        warnings: dates.warnings,
+        uniqueDates,
+      },
+    });
+  });
+
+  // ─── POST /jobs/reconcile-dates ──────────────────────────────────────────
+  // Bulk version — reconcile every completed job that has extracted_data.fullText.
+  app.post('/jobs/reconcile-dates', async (_req, reply) => {
+    const supabase = supabaseAdmin();
+    const PAGE = 100;
+    let offset = 0;
+    let processed = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    while (true) {
+      const { data, error } = await supabase
+        .from('ocr_jobs')
+        .select('id, original_name, extracted_data, report_type, report_category, date_folder')
+        .eq('status', 'completed')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + PAGE - 1);
+      if (error) {
+        return reply.code(500).send({ success: false, error: { code: 'DB_ERROR', message: error.message } });
+      }
+      if (!data || data.length === 0) break;
+
+      for (const row of data as Array<Record<string, unknown>>) {
+        processed++;
+        const fullText = ((row.extracted_data as { fullText?: string } | null)?.fullText) ?? '';
+        if (!fullText) { skipped++; continue; }
+
+        const category = (row.report_category as string | null) ?? 'Uncategorized';
+        const filenameDate = (row.date_folder as string | null) ?? null;
+        const dates = reconcileDates({ filenameDate, fullText, category });
+        const uniqueDates = extractUniqueDates(fullText);
+        const nextExtracted = { ...((row.extracted_data as Record<string, unknown>) ?? {}), uniqueDates };
+
+        const { error: updErr } = await supabase
+          .from('ocr_jobs')
+          .update({
+            business_date: dates.businessDate,
+            report_generated_at: dates.reportGeneratedAt,
+            filename_date: dates.filenameDate,
+            warnings: dates.warnings,
+            extracted_data: nextExtracted,
+          })
+          .eq('id', row.id as string);
+        if (updErr) { skipped++; continue; }
+        updated++;
+      }
+
+      if (data.length < PAGE) break;
+      offset += PAGE;
+    }
+
+    return reply.send({ success: true, data: { processed, updated, skipped } });
+  });
+
   // ─── POST /jobs/snapshot ─────────────────────────────────────────────────
   // Dump the current ocr_jobs table to a server-side JSON file. The
   // Documents page reads from /jobs/persisted (below) so even after
@@ -1025,11 +1273,13 @@ export async function ocrRoutes(app: FastifyInstance) {
 
     // Merge with existing snapshot — anything in the old snapshot that's
     // missing from the live DB is marked archived:true so it stays visible.
+    // Preserve deletedAt so single-file deletes stay tombstoned across
+    // re-snapshots (otherwise the next snapshot would "un-delete" them).
     const prev = await readSnapshot();
     const liveIds = new Set(collected.map((j) => j.id));
     const archivedFromPrev = (prev?.jobs ?? [])
       .filter((j) => !liveIds.has(j.id))
-      .map((j) => ({ ...j, archived: true }));
+      .map((j) => ({ ...j, archived: true, deletedAt: j.deletedAt ?? null }));
 
     const merged: SnapshotFile = {
       generatedAt: new Date().toISOString(),
@@ -1073,6 +1323,10 @@ export async function ocrRoutes(app: FastifyInstance) {
         search: z.string().min(1).max(200).optional(),
         page: z.coerce.number().int().min(1).default(1),
         limit: z.coerce.number().int().min(1).max(10000).default(100),
+        // Opt out of the default tombstone filter — e.g. an admin audit view
+        // that wants to see what was deleted. The Documents UI omits this,
+        // so deleted rows disappear from the library by default.
+        includeDeleted: z.coerce.boolean().default(false),
       })
       .safeParse(req.query);
     if (!parsed.success) {
@@ -1083,33 +1337,29 @@ export async function ocrRoutes(app: FastifyInstance) {
     }
     const q = parsed.data;
 
-    let snap = await readSnapshot();
-    // First-run convenience: if no snapshot exists yet, generate one on the
-    // fly so the Documents page has something to render. Operators can still
-    // explicitly snapshot later from Settings → Storage.
-    if (!snap) {
-      try {
-        const res = await app.inject({ method: 'POST', url: '/api/v1/ocr/jobs/snapshot' });
-        if (res.statusCode < 400) {
-          snap = await readSnapshot();
-        }
-      } catch (e) {
-        app.log.warn({ err: (e as Error).message }, 'ocr_persisted.auto_snapshot_failed');
-      }
-    }
-    if (!snap) {
-      return reply.send({
-        success: true,
-        data: [],
-        total: 0,
-        page: q.page,
-        limit: q.limit,
-        totalPages: 1,
-        snapshotGeneratedAt: null,
-      });
-    }
+    const snap = await readSnapshot();
 
-    let items = snap.jobs;
+    let items: SnapshotJob[];
+    if (q.includeDeleted) {
+      // Audit view — everything the snapshot ever recorded, including
+      // tombstones. Needs a snapshot file; if there is none we still fall
+      // back to live DB rows below.
+      items = snap?.jobs ?? [];
+    } else {
+      // Default view — mirror what's physically present. Read the live DB
+      // as the source of truth, then overlay bulk-archived rows from the
+      // snapshot (those are "gone from DB but kept for the library" by
+      // design). This path doesn't rely on the snapshot being fresh, so
+      // new uploads appear immediately and DB-level deletes disappear.
+      const supabase = supabaseAdmin();
+      const live = await fetchLiveJobsForLibrary(supabase);
+
+      const archived: SnapshotJob[] = (snap?.jobs ?? []).filter(
+        (j) => j.archived && !j.deletedAt && !live.some((l) => l.id === j.id),
+      );
+
+      items = [...live, ...archived];
+    }
     if (q.property)   items = items.filter((j) => j.property === q.property);
     if (q.dateFolder) items = items.filter((j) => j.dateFolder === q.dateFolder);
     if (q.reportType) items = items.filter((j) => j.reportType === q.reportType);
@@ -1130,7 +1380,7 @@ export async function ocrRoutes(app: FastifyInstance) {
       page: q.page,
       limit: q.limit,
       totalPages: Math.max(1, Math.ceil(total / q.limit)),
-      snapshotGeneratedAt: snap.generatedAt,
+      snapshotGeneratedAt: snap?.generatedAt ?? null,
     });
   });
 

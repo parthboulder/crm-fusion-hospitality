@@ -13,6 +13,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { processFile, extractFinancialData, TesseractWorkerPool } from '../lib/ocr/index.js';
 import { ingestOcrResult } from '../lib/report-parsers.js';
 import { classifyFromContent } from '../lib/report-classifier.js';
+import { reconcileDates, extractUniqueDates } from '../lib/date-reconciler.js';
 import { env } from '../config/env.js';
 
 interface WorkerHandle {
@@ -208,6 +209,11 @@ export function startOcrWorker(log: FastifyBaseLogger): WorkerHandle {
           pages: ocrResult.pages,
         },
         financial,
+        // Every distinct ISO date found anywhere in the body, sorted
+        // ascending. The UI renders this as the "Dates found" section —
+        // deduped and normalized so "26-Mar-26" and "03/26/2026" collapse
+        // into one chip.
+        uniqueDates: extractUniqueDates(ocrResult.fullText),
         fullText: ocrResult.fullText,
         fullTextPreview: ocrResult.fullText.slice(0, 4000),
       };
@@ -216,20 +222,59 @@ export function startOcrWorker(log: FastifyBaseLogger): WorkerHandle {
       // filename-only guess made at upload time.
       const refined = classifyFromContent(job.originalName, ocrResult.fullText);
 
+      // Reconcile the three date sources. Filename date (from the classifier)
+      // is the weakest signal; business date lives in the PDF body and is
+      // canonical. Any drift surfaces as a warning on the job.
+      const dates = reconcileDates({
+        filenameDate: refined.dateFolder,
+        fullText: ocrResult.fullText,
+        category: refined.category,
+      });
+
+      if (dates.warnings.length > 0) {
+        log.info(
+          { jobId: job.id, warnings: dates.warnings.map((w) => w.code) },
+          'ocr_worker.job.date_warnings',
+        );
+      }
+
       const completePayload: Record<string, unknown> = {
         status: 'completed',
         completed_at: new Date().toISOString(),
         extracted_data: extractedData,
         property: refined.property,
+        // date_folder stays as the filename-derived date for backwards
+        // compat with the existing dropdown filter.
         date_folder: refined.dateFolder,
         report_type: refined.reportType,
         report_category: refined.category,
+        business_date: dates.businessDate,
+        report_generated_at: dates.reportGeneratedAt,
+        filename_date: dates.filenameDate,
+        warnings: dates.warnings,
       };
 
       let { error: completeErr } = await supabase
         .from('ocr_jobs')
         .update(completePayload)
         .eq('id', job.id);
+
+      // Migration 015 not yet applied — retry without business-date fields.
+      if (completeErr && /column.*(business_date|report_generated_at|filename_date|warnings).*does not exist|42703/i.test(completeErr.message)) {
+        log.warn({ err: completeErr.message, jobId: job.id }, 'ocr_business_date_columns_missing_skipping');
+        const {
+          business_date: _b,
+          report_generated_at: _r,
+          filename_date: _f,
+          warnings: _w,
+          ...withoutBusinessDates
+        } = completePayload;
+        const retry = await supabase
+          .from('ocr_jobs')
+          .update(withoutBusinessDates)
+          .eq('id', job.id);
+        completeErr = retry.error;
+      }
 
       // Migration 014 not yet applied — retry without classification fields
       // so the OCR pipeline still completes successfully.

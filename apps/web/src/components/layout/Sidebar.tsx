@@ -20,17 +20,28 @@ import { api } from '../../lib/api-client';
 import { useMyIp, formatLocation } from '../../lib/ipgeo';
 
 const nav = [
-  { label: 'Dashboard',   to: '/dashboard',   Icon: HomeIcon },
-  { label: 'Performance', to: '/stoneriver',  Icon: ChartBarIcon },
+  { label: 'Dashboard',   to: '/dashboard',  Icon: HomeIcon },
+  { label: 'Performance', to: '/stoneriver', Icon: ChartBarIcon },
   { label: 'Documents',   to: '/documents',  Icon: FolderOpenIcon },
   { label: 'OCR Uploads', to: '/ocr',        Icon: CloudArrowUpIcon },
 ];
+
+function NavTooltip({ label }: { label: string }) {
+  return (
+    <span
+      role="tooltip"
+      className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 z-20 whitespace-nowrap rounded bg-neutral-900 text-white text-xs font-semibold px-2 py-1 shadow-lg opacity-0 group-hover:opacity-100 transition-opacity"
+    >
+      {label}
+    </span>
+  );
+}
 
 export function Sidebar() {
   const { user, clearUser } = useAuthStore();
   const navigate = useNavigate();
   const { data: myIp } = useMyIp();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
 
   async function handleLogout() {
     await api.post('/auth/logout').catch(() => null);
@@ -90,10 +101,9 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
-            title={collapsed ? label : undefined}
             className={({ isActive }) =>
               clsx(
-                'flex items-center gap-3 py-2 rounded text-sm font-medium transition-colors',
+                'group relative flex items-center gap-3 py-2 rounded text-sm font-medium transition-colors',
                 collapsed ? 'justify-center px-2' : 'px-3',
                 isActive
                   ? 'bg-neutral-100 text-neutral-900'
@@ -103,16 +113,16 @@ export function Sidebar() {
           >
             <Icon className="w-4 h-4 shrink-0" />
             {!collapsed && <span className="flex-1">{label}</span>}
+            {collapsed && <NavTooltip label={label} />}
           </NavLink>
         ))}
 
         {isAdmin && (
           <NavLink
             to="/admin"
-            title={collapsed ? 'Admin' : undefined}
             className={({ isActive }) =>
               clsx(
-                'flex items-center gap-3 py-2 rounded text-sm font-medium transition-colors',
+                'group relative flex items-center gap-3 py-2 rounded text-sm font-medium transition-colors',
                 collapsed ? 'justify-center px-2' : 'px-3',
                 isActive
                   ? 'bg-neutral-100 text-neutral-900'
@@ -122,6 +132,7 @@ export function Sidebar() {
           >
             <CogIcon className="w-4 h-4 shrink-0" />
             {!collapsed && <span>Admin</span>}
+            {collapsed && <NavTooltip label="Admin" />}
           </NavLink>
         )}
       </nav>

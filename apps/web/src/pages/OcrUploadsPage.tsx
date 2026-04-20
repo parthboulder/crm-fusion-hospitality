@@ -30,6 +30,7 @@ import {
   ChevronRightIcon,
   FunnelIcon,
   EyeIcon,
+  DocumentDuplicateIcon,
 } from '@heroicons/react/24/outline';
 import { api } from '../lib/api-client';
 import { useUploadStore } from '../store/upload.store';
@@ -37,6 +38,12 @@ import { UploadProgressCard as SharedUploadProgressCard } from '../components/up
 import { SinglePdfViewer } from '../components/common/SinglePdfViewer';
 
 type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
+
+interface OcrWarning {
+  code: 'YEAR_MISMATCH' | 'LATE_AUDIT' | 'DATE_SOURCE_MISSING' | 'FILENAME_DATE_DRIFT' | string;
+  message: string;
+  detail?: Record<string, unknown>;
+}
 
 interface OcrJob {
   id: string;
@@ -58,6 +65,11 @@ interface OcrJob {
   dateFolder: string | null;
   reportType: string | null;
   reportCategory: string | null;
+  // Date reconciliation — migration 015. Business date is canonical.
+  businessDate: string | null;
+  reportGeneratedAt: string | null;
+  filenameDate: string | null;
+  warnings: OcrWarning[];
 }
 
 interface OcrFacets {
@@ -91,6 +103,7 @@ interface OcrJobDetail extends OcrJob {
       };
       confidence: number;
     };
+    uniqueDates?: string[];
     fullTextPreview: string;
   } | null;
 }
@@ -212,6 +225,7 @@ export function OcrUploadsPage() {
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const [previewJob, setPreviewJob] = useState<{ id: string; name: string; url: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -224,16 +238,6 @@ export function OcrUploadsPage() {
     onScroll();
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
-
-  // Live API connectivity check — lights up the status dot in the page header.
-  const { data: apiHealth, isError: apiHealthError } = useQuery<{ status: string }>({
-    queryKey: ['api-health'],
-    queryFn: () => api.get<{ status: string }>('/health'),
-    refetchInterval: 15_000,
-    retry: 1,
-    staleTime: 10_000,
-  });
-  const apiConnected = !apiHealthError && apiHealth?.status === 'ok';
 
   // Upload state lives in a global store so progress survives navigation.
   const batch = useUploadStore((s) => s.batch);
@@ -259,7 +263,7 @@ export function OcrUploadsPage() {
     params.set('limit', String(JOBS_PER_PAGE));
     params.set('page', String(page));
     if (statusFilter !== 'all' && statusFilter !== 'active') params.set('status', statusFilter);
-    if (statusFilter === 'active') params.set('status', 'pending'); // active = pending + processing
+    if (statusFilter === 'active') params.set('status', 'pending,processing');
     return params.toString();
   })();
 
@@ -267,11 +271,17 @@ export function OcrUploadsPage() {
     queryKey: ['ocr-jobs', page, statusFilter, propertyFilter, dateFilter, reportTypeFilter, categoryFilter, searchQuery],
     queryFn: () => api.get(`/ocr/jobs?${queryParams}`),
     placeholderData: keepPreviousData,
+    // 3s while any job is pending/processing (responsive during uploads),
+    // 30s when idle — cross-tab mutations still surface within half a minute,
+    // and refetchOnWindowFocus fires an immediate refetch when the user
+    // tabs back in, so a slower idle cadence doesn't feel stale.
     refetchInterval: (q) => {
       const list = q.state.data?.data ?? [];
       return list.some((j) => ACTIVE_STATUSES.includes(j.status)) ? 3000 : 30_000;
     },
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    staleTime: 5_000,
   });
 
   // Facets — populated dropdown options across the WHOLE dataset (not just
@@ -285,6 +295,7 @@ export function OcrUploadsPage() {
     queryFn: () => api.get(`/ocr/jobs/facets${classificationParams ? `?${classificationParams}` : ''}`),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+    refetchOnWindowFocus: true,
   });
   const facets: OcrFacets = facetsResp?.data ?? { properties: [], dates: [], reportTypes: [], categories: [] };
 
@@ -695,21 +706,6 @@ export function OcrUploadsPage() {
                 Compact
               </button>
             </div>
-            <span
-              className={clsx(
-                'hidden md:inline-flex items-center gap-1.5 text-[11px]',
-                apiConnected ? 'text-neutral-500' : 'text-danger-600',
-              )}
-              title={apiConnected ? 'API health check passing' : 'API health check failed — requests may not succeed'}
-            >
-              <span
-                className={clsx(
-                  'w-1.5 h-1.5 rounded-full',
-                  apiConnected ? 'bg-success-500' : 'bg-danger-500 animate-pulse',
-                )}
-              />
-              {apiConnected ? 'API connected' : 'API offline'}
-            </span>
           </div>
         </div>
 
@@ -1171,9 +1167,27 @@ export function OcrUploadsPage() {
                             {job.reportCategory}
                           </span>
                         )}
-                        {job.dateFolder && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium tabular-nums">
+                        {job.businessDate ? (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium tabular-nums"
+                            title={`Business date (from PDF)${job.filenameDate && job.filenameDate !== job.businessDate ? ` · filename: ${job.filenameDate}` : ''}`}
+                          >
+                            {job.businessDate}
+                          </span>
+                        ) : job.dateFolder ? (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium tabular-nums"
+                            title="Filename date (business date not yet parsed)"
+                          >
                             {job.dateFolder}
+                          </span>
+                        ) : null}
+                        {job.warnings && job.warnings.length > 0 && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-warning-50 text-warning-700 font-semibold"
+                            title={job.warnings.map((w) => w.message).join('\n')}
+                          >
+                            ⚠ {job.warnings.length} warning{job.warnings.length > 1 ? 's' : ''}
                           </span>
                         )}
                         <span className="text-[10px] text-neutral-400 tabular-nums">
@@ -1237,9 +1251,7 @@ export function OcrUploadsPage() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (confirm(`Delete "${job.originalName}"? This removes the file and job record.`)) {
-                            deleteMutation.mutate(job.id);
-                          }
+                          setDeleteTarget({ id: job.id, name: job.originalName });
                         }}
                         disabled={deleteMutation.isPending}
                         title="Delete job and file"
@@ -1255,64 +1267,69 @@ export function OcrUploadsPage() {
             </div>
           )}
 
-          {/* Pagination */}
-          {(listData?.totalPages ?? 1) > 1 && (() => {
-            const totalPages = listData?.totalPages ?? 1;
-            const total = listData?.total ?? 0;
-            const top = total === 0 ? 0 : total - (page - 1) * JOBS_PER_PAGE;
-            const bottom = Math.max(1, total - page * JOBS_PER_PAGE + 1);
-            const pageNumbers = buildPageRange(page, totalPages);
-            return (
-              <nav className="mt-6 flex items-center justify-between" aria-label="Jobs pagination">
-                <span className="text-sm text-neutral-600 tabular-nums">
-                  Showing <span className="font-semibold text-neutral-900">{top}</span>–<span className="font-semibold text-neutral-900">{bottom}</span> of <span className="font-semibold text-neutral-900">{total.toLocaleString()}</span>
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={page <= 1}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    aria-label="Previous page"
-                  >
-                    <ChevronLeftIcon className="w-4 h-4" />
-                    Previous
-                  </button>
-                  <div className="flex items-center gap-1 mx-1">
-                    {pageNumbers.map((p, i) =>
-                      p === '…' ? (
-                        <span key={`ellipsis-${i}`} className="px-2 text-neutral-400 select-none">…</span>
-                      ) : (
-                        <button
-                          key={p}
-                          onClick={() => setPage(p)}
-                          aria-current={p === page ? 'page' : undefined}
-                          className={clsx(
-                            'min-w-[34px] px-2 py-1.5 text-sm font-medium rounded-md transition-colors tabular-nums',
-                            p === page
-                              ? 'bg-neutral-900 text-white'
-                              : 'text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-50',
-                          )}
-                        >
-                          {p}
-                        </button>
-                      ),
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={page >= totalPages}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    aria-label="Next page"
-                  >
-                    Next
-                    <ChevronRightIcon className="w-4 h-4" />
-                  </button>
+        </div>
+        </div>
+
+        {/* Sticky pagination — lives outside the scroll region, pinned to the
+            bottom of the middle column, same shape as Documents page. */}
+        {(listData?.totalPages ?? 1) > 1 && (() => {
+          const totalPages = listData?.totalPages ?? 1;
+          const total = listData?.total ?? 0;
+          const top = total === 0 ? 0 : total - (page - 1) * JOBS_PER_PAGE;
+          const bottom = Math.max(1, total - page * JOBS_PER_PAGE + 1);
+          const pageNumbers = buildPageRange(page, totalPages);
+          return (
+            <nav
+              className="px-4 py-3 border-t border-neutral-200 bg-white flex items-center justify-between shrink-0"
+              aria-label="Jobs pagination"
+            >
+              <span className="text-xs text-neutral-600 tabular-nums">
+                Showing <span className="font-semibold text-neutral-900">{top}</span>–<span className="font-semibold text-neutral-900">{bottom}</span> of <span className="font-semibold text-neutral-900">{total.toLocaleString()}</span>
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeftIcon className="w-3.5 h-3.5" />
+                  Previous
+                </button>
+                <div className="flex items-center gap-1 mx-1">
+                  {pageNumbers.map((p, i) =>
+                    p === '…' ? (
+                      <span key={`ellipsis-${i}`} className="px-1.5 text-neutral-400 select-none">…</span>
+                    ) : (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        aria-current={p === page ? 'page' : undefined}
+                        className={clsx(
+                          'min-w-[28px] px-2 py-1 text-xs font-medium rounded-md transition-colors tabular-nums',
+                          p === page
+                            ? 'bg-neutral-900 text-white'
+                            : 'text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-50',
+                        )}
+                      >
+                        {p}
+                      </button>
+                    ),
+                  )}
                 </div>
-              </nav>
-            );
-          })()}
-        </div>
-        </div>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  aria-label="Next page"
+                >
+                  Next
+                  <ChevronRightIcon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </nav>
+          );
+        })()}
       </div>
 
       {/* Detail panel */}
@@ -1349,11 +1366,7 @@ export function OcrUploadsPage() {
                     )}
                     {(detail.status === 'completed' || detail.status === 'failed') && (
                       <button
-                        onClick={() => {
-                          if (confirm(`Delete "${detail.originalName}"? This removes the file and job record.`)) {
-                            deleteMutation.mutate(detail.id);
-                          }
-                        }}
+                        onClick={() => setDeleteTarget({ id: detail.id, name: detail.originalName })}
                         disabled={deleteMutation.isPending}
                         className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-600 hover:bg-danger-50 hover:text-danger-700 rounded transition-colors disabled:opacity-50"
                       >
@@ -1378,7 +1391,19 @@ export function OcrUploadsPage() {
                   {detail.property &&        <Row label="Property"    value={detail.property} />}
                   {detail.reportType &&      <Row label="Report Type" value={detail.reportType} />}
                   {detail.reportCategory &&  <Row label="Category"    value={detail.reportCategory} />}
-                  {detail.dateFolder &&      <Row label="Date"        value={detail.dateFolder} />}
+                  {detail.businessDate &&    <Row label="Business Date" value={detail.businessDate} />}
+                  {detail.reportGeneratedAt && (
+                    <Row
+                      label="Report Run"
+                      value={`${detail.reportGeneratedAt.slice(0, 10)} ${detail.reportGeneratedAt.slice(11, 19)}`}
+                    />
+                  )}
+                  {detail.filenameDate && detail.filenameDate !== detail.businessDate && (
+                    <Row label="Filename Date" value={detail.filenameDate} />
+                  )}
+                  {!detail.businessDate && detail.dateFolder && (
+                    <Row label="Date" value={detail.dateFolder} />
+                  )}
                   <Row label="Size" value={fmtSize(detail.fileSizeBytes)} />
                   <Row label="Type" value={detail.fileType} />
                   <Row label="Uploaded" value={fmtRelative(detail.createdAt)} />
@@ -1386,6 +1411,22 @@ export function OcrUploadsPage() {
                     <Row label="Completed" value={fmtRelative(detail.completedAt)} />
                   )}
                 </dl>
+
+                {detail.warnings && detail.warnings.length > 0 && (
+                  <div className="mb-4 p-2 bg-warning-50 rounded text-xs">
+                    <p className="font-semibold text-warning-700 mb-1 uppercase tracking-wider text-[10px]">
+                      Date validation warnings
+                    </p>
+                    <ul className="space-y-1">
+                      {detail.warnings.map((w, i) => (
+                        <li key={`${w.code}-${i}`} className="text-warning-800">
+                          <span className="font-mono text-[10px] font-semibold">{w.code}</span>
+                          <span className="ml-2">{w.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {detail.status === 'failed' && detail.errorMessage && (
                   <div className="p-2 bg-danger-50 rounded text-xs text-danger-700 mb-4">
@@ -1440,20 +1481,36 @@ export function OcrUploadsPage() {
                       </Section>
                     )}
 
-                    {detail.extractedData.financial.dates.length > 0 && (
-                      <Section title="Dates found">
-                        <div className="flex flex-wrap gap-1">
-                          {detail.extractedData.financial.dates.slice(0, 10).map((d, i) => (
-                            <span key={i} className="text-[10px] px-1.5 py-0.5 bg-neutral-100 rounded text-neutral-700">
-                              {d}
-                            </span>
-                          ))}
-                        </div>
-                      </Section>
-                    )}
+                    {(() => {
+                      // Prefer the normalized+deduped list; fall back to the
+                      // raw financial.dates for jobs processed before the
+                      // uniqueDates field was added.
+                      const unique = detail.extractedData.uniqueDates ?? [];
+                      const dates = unique.length > 0
+                        ? unique
+                        : Array.from(new Set(detail.extractedData.financial.dates)).sort();
+                      if (dates.length === 0) return null;
+                      return (
+                        <Section title={`Dates found (${dates.length})`}>
+                          <div className="flex flex-wrap gap-1">
+                            {dates.map((d) => (
+                              <span
+                                key={d}
+                                className="text-[10px] px-1.5 py-0.5 bg-neutral-100 rounded text-neutral-700 tabular-nums"
+                              >
+                                {d}
+                              </span>
+                            ))}
+                          </div>
+                        </Section>
+                      );
+                    })()}
 
                     {detail.extractedData.fullTextPreview && (
-                      <Section title="Text preview">
+                      <Section
+                        title="Text preview"
+                        action={<CopyButton text={detail.extractedData.fullTextPreview} />}
+                      >
                         <pre className="text-[10px] text-neutral-600 bg-neutral-50 rounded p-2 max-h-60 overflow-auto whitespace-pre-wrap font-mono">
                           {detail.extractedData.fullTextPreview.slice(0, 1200)}
                           {detail.extractedData.fullTextPreview.length > 1200 && '\n…'}
@@ -1477,6 +1534,86 @@ export function OcrUploadsPage() {
           onClose={() => setPreviewJob(null)}
         />
       )}
+
+      {deleteTarget && (
+        <DeleteConfirmModal
+          name={deleteTarget.name}
+          busy={deleteMutation.isPending}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            const id = deleteTarget.id;
+            deleteMutation.mutate(id, {
+              onSettled: () => setDeleteTarget(null),
+            });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteConfirmModal({
+  name, busy, onCancel, onConfirm,
+}: { name: string; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-neutral-900/40 backdrop-blur-sm p-4"
+      onClick={onCancel}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-confirm-title"
+    >
+      <div
+        className="w-full max-w-md bg-white rounded-xl shadow-2xl border border-neutral-200 overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5">
+          <div className="flex items-start gap-3">
+            <div className="shrink-0 w-9 h-9 rounded-full bg-danger-50 flex items-center justify-center">
+              <TrashIcon className="w-5 h-5 text-danger-600" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 id="delete-confirm-title" className="text-sm font-semibold text-neutral-900">
+                Delete this file?
+              </h3>
+              <p className="mt-1 text-xs text-neutral-600 break-words">
+                {name}
+              </p>
+              <p className="mt-2 text-xs text-neutral-500">
+                This removes the file from storage and the job record from the database. This action cannot be undone.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-3 bg-neutral-50 border-t border-neutral-200">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1.5 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-danger-600 rounded-md hover:bg-danger-700 disabled:opacity-50 transition-colors"
+          >
+            {busy ? (
+              <>
+                <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" />
+                Deleting…
+              </>
+            ) : (
+              <>
+                <TrashIcon className="w-3.5 h-3.5" />
+                Delete
+              </>
+            )}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1500,12 +1637,50 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title, children, action,
+}: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="mb-4">
-      <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2">{title}</p>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest">{title}</p>
+        {action}
+      </div>
       <div className="space-y-0.5">{children}</div>
     </div>
+  );
+}
+
+function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard may be denied on insecure contexts — silently ignore.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded transition-colors"
+      aria-label={`${label} to clipboard`}
+    >
+      {copied ? (
+        <>
+          <CheckCircleIcon className="w-3 h-3 text-success-600" />
+          Copied
+        </>
+      ) : (
+        <>
+          <DocumentDuplicateIcon className="w-3 h-3" />
+          {label}
+        </>
+      )}
+    </button>
   );
 }
 

@@ -6,204 +6,18 @@ import type { FastifyInstance } from 'fastify';
 import { spawn } from 'child_process';
 import path from 'path';
 import { readFileSync } from 'fs';
+import {
+  parseRevenueFlash,
+  parseFlashReport,
+  parseEngineering,
+} from '../../lib/report-parsers.js';
+import { reconcileDates } from '../../lib/date-reconciler.js';
 
-// ── Property name / group mappings (must match ingest-to-supabase.ts) ──────
-
-const KNOWN_PROPERTIES = [
-  'Candlewood Suites', 'Holiday Inn Express Fulton', 'Holiday Inn Express Memphis Southwind',
-  'Holiday Inn Express Tupelo', 'Holiday Inn Tupelo', 'Four Points Memphis Southwind',
-  'Best Western Tupelo', 'Surestay Tupelo', 'SureStay Tupelo', 'Hyatt Place Biloxi',
-  'Comfort Inn Tupelo', 'Hilton Garden Inn Olive Branch', 'TownePlace Suites',
-  'Best Western Plus Olive Branch', 'Home 2 Suites by Hilton Tupelo', 'Home2 Suites by Hilton Tupelo',
-  'Tru by Hilton Tupelo', 'Holiday Inn Meridian', 'Hilton Garden Inn Meridian',
-  'Hampton Inn Meridian', 'Hampton Inn Vicksburg', 'DoubleTree Biloxi', 'Hilton Garden Inn Madison',
-];
-
-const NAME_MAP: Record<string, string> = {
-  'Surestay Tupelo': 'SureStay Hotel', 'SureStay Tupelo': 'SureStay Hotel',
-  'Hilton Garden Inn Olive Branch': 'HGI Olive Branch',
-  'Home 2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
-  'Home2 Suites by Hilton Tupelo': 'Home2 Suites By Hilton',
-  'Tru by Hilton Tupelo': 'Tru By Hilton Tupelo',
-};
-
-const GROUP_MAP: Record<string, string> = {
-  'HGI Olive Branch': 'Hilton', 'Tru By Hilton Tupelo': 'Hilton', 'Hampton Inn Vicksburg': 'Hilton',
-  'DoubleTree Biloxi': 'Hilton', 'Home2 Suites By Hilton': 'Hilton', 'Hilton Garden Inn Madison': 'Hilton',
-  'Hilton Garden Inn Meridian': 'Hilton', 'Hampton Inn Meridian': 'Hilton',
-  'Holiday Inn Meridian': 'IHG', 'Candlewood Suites': 'IHG', 'Holiday Inn Express Fulton': 'IHG',
-  'Holiday Inn Express Memphis Southwind': 'IHG', 'Holiday Inn Express Tupelo': 'IHG', 'Holiday Inn Tupelo': 'IHG',
-  'Four Points Memphis Southwind': 'Marriott', 'TownePlace Suites': 'Marriott',
-  'Best Western Tupelo': 'Best Western', 'SureStay Hotel': 'Best Western', 'Best Western Plus Olive Branch': 'Best Western',
-  'Hyatt Place Biloxi': 'Hyatt', 'Comfort Inn Tupelo': 'Choice',
-};
-
-const DBA_MAP: Record<string, string> = {
-  'best western plus tupelo': 'Best Western Tupelo', 'hie fulton': 'Holiday Inn Express Fulton',
-  'surestay tupelo': 'SureStay Hotel', 'holiday inn tupelo': 'Holiday Inn Tupelo',
-  'comfort inn': 'Comfort Inn Tupelo', 'candlewood tupelo': 'Candlewood Suites',
-  'hie tupelo': 'Holiday Inn Express Tupelo', 'home2 suites tupelo': 'Home2 Suites By Hilton',
-  'tru by hilton tupelo': 'Tru By Hilton Tupelo', 'tps olive branch': 'TownePlace Suites',
-  'hgi olive branch': 'HGI Olive Branch', 'holiday inn meridian': 'Holiday Inn Meridian',
-  'hampton inn meridian': 'Hampton Inn Meridian', 'hgi meridian': 'Hilton Garden Inn Meridian',
-  'hyatt place biloxi': 'Hyatt Place Biloxi', 'best western plus desoto': 'Best Western Plus Olive Branch',
-  'hie memphis southwind': 'Holiday Inn Express Memphis Southwind',
-  'four points memphis southwind': 'Four Points Memphis Southwind',
-  'hgi madison': 'Hilton Garden Inn Madison', 'hampton inn vicksburg': 'Hampton Inn Vicksburg',
-  'doubletree biloxi': 'DoubleTree Biloxi',
-};
-
-const HOTEL_MAP: Record<string, string> = {
-  'bw tupelo': 'Best Western Tupelo', 'hie fulton': 'Holiday Inn Express Fulton',
-  'hi tupelo': 'Holiday Inn Tupelo', 'comfort inn tupelo': 'Comfort Inn Tupelo',
-  'candlewood tupelo': 'Candlewood Suites', 'hie tupelo': 'Holiday Inn Express Tupelo',
-  'tru tupelo': 'Tru By Hilton Tupelo', 'home 2 suites': 'Home2 Suites By Hilton',
-  'hyatt biloxi': 'Hyatt Place Biloxi', 'hyatt place biloxi': 'Hyatt Place Biloxi',
-  'tps olive branch': 'TownePlace Suites', 'hgi olive branch': 'HGI Olive Branch',
-  'hilton garden inn olive branch': 'HGI Olive Branch', 'bw plus ob': 'Best Western Plus Olive Branch',
-  'hgi madison': 'Hilton Garden Inn Madison', 'holiday inn meridian': 'Holiday Inn Meridian',
-  'hampton inn meridian': 'Hampton Inn Meridian', 'hgi meridian': 'Hilton Garden Inn Meridian',
-  'hampton inn vicksburg': 'Hampton Inn Vicksburg', 'doubletree biloxi': 'DoubleTree Biloxi',
-  'fp southwind': 'Four Points Memphis Southwind', 'hie southwind': 'Holiday Inn Express Memphis Southwind',
-  'hie memphis southwind': 'Holiday Inn Express Memphis Southwind',
-  'surestay tupelo': 'SureStay Hotel',
-};
-
-// ── Parsers ────────────────────────────────────────────────────────────────
-
-function parseNum(s: string | undefined): number | null {
-  if (!s) return null;
-  let c = s.replace(/[$,%\s]/g, '').replace(/,/g, '');
-  if (c.startsWith('(') && c.endsWith(')')) c = '-' + c.slice(1, -1);
-  const v = parseFloat(c);
-  return isNaN(v) ? null : v;
-}
-
-function parsePct(s: string | undefined): number | null {
-  if (!s) return null;
-  const v = parseFloat(s.replace(/[%\s]/g, ''));
-  if (isNaN(v) || v < 0) return null;
-  if (v > 0 && v <= 1) return v * 100;
-  return v > 100 ? null : v;
-}
-
-function parseRevenueFlash(text: string, date: string): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let matched: string | null = null;
-    let remainder = '';
-    for (const prop of KNOWN_PROPERTIES) {
-      const regex = new RegExp(`^${prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[.,]?\\s*`, 'i');
-      const m = trimmed.match(regex);
-      if (m) { matched = prop; remainder = trimmed.slice(m[0].length).trim(); break; }
-    }
-    if (!matched) continue;
-    const canonical = NAME_MAP[matched] ?? matched;
-    if (seen.has(canonical)) continue;
-    const tokens = remainder.match(/\(?\$?[\d,]+\.?\d*%?\)?/g) ?? [];
-    if (tokens.length < 8) continue;
-    seen.add(canonical);
-    rows.push({
-      property_name: canonical, property_group: GROUP_MAP[canonical] ?? 'Other', report_date: date,
-      occupancy_day: parsePct(tokens[0]), adr_day: parseNum(tokens[1]), revpar_day: parseNum(tokens[2]),
-      total_rooms_sold: parseNum(tokens[3]), revenue_day: parseNum(tokens[4]),
-      ooo_rooms: parseNum(tokens[5]), py_revenue_day: parseNum(tokens[6]),
-      occupancy_mtd: tokens.length > 8 ? parsePct(tokens[8]) : null,
-      adr_mtd: tokens.length > 9 ? parseNum(tokens[9]) : null,
-      revpar_mtd: tokens.length > 10 ? parseNum(tokens[10]) : null,
-      revenue_mtd: tokens.length > 11 ? parseNum(tokens[11]) : null,
-      py_revenue_mtd: tokens.length > 12 ? parseNum(tokens[12]) : null,
-      occupancy_ytd: tokens.length > 14 ? parsePct(tokens[14]) : null,
-      adr_ytd: tokens.length > 15 ? parseNum(tokens[15]) : null,
-      revpar_ytd: tokens.length > 16 ? parseNum(tokens[16]) : null,
-      revenue_ytd: tokens.length > 17 ? parseNum(tokens[17]) : null,
-      py_revenue_ytd: tokens.length > 18 ? parseNum(tokens[18]) : null,
-      report_format: 'revenue-flash',
-    });
-  }
-  return rows;
-}
-
-function parseFlashReport(text: string, date: string): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  const sections = text.split(/(?=Entity Name)/);
-  for (const section of sections) {
-    const lines = section.split('\n').filter((l: string) => l.trim());
-    let dbaRow: string[] = [];
-    const metricRows: { label: string; cells: string[] }[] = [];
-    for (const line of lines) {
-      const hasTabs = line.includes('\t');
-      if (hasTabs) {
-        const cells = line.split('\t');
-        const label = cells[0]?.trim() || cells[1]?.trim() || '';
-        const dataCells = cells.slice(2).map((c: string) => c.trim());
-        if (label === 'DBA') dbaRow = dataCells;
-        else if (label === 'Entity Name' || label === 'Date' || /^\d{2}\/\d{2}\/\d{4}/.test(label)) { /* skip */ }
-        else if (label === 'Total' || (!cells[0]?.trim() && !cells[1]?.trim() && dataCells[0])) metricRows.push({ label: 'AR Total', cells: dataCells });
-        else if (label) metricRows.push({ label, cells: dataCells });
-      } else {
-        const parts = line.split(/\s{3,}/).map((s: string) => s.trim()).filter(Boolean);
-        const label = parts[0] ?? '';
-        const cells = parts.slice(1);
-        if (label === 'DBA') dbaRow = cells;
-        else if (label === 'Entity Name' || label === 'Date' || /^\d{1,2}\/\d{1,2}\/\d{4}/.test(label)) { /* skip */ }
-        else if (label === 'Total') metricRows.push({ label: 'AR Total', cells });
-        else if (/^[-$]/.test(label) && cells.length > 0) metricRows.push({ label: 'AR Total', cells: [label, ...cells] });
-        else if (cells.length > 0) metricRows.push({ label, cells });
-      }
-    }
-    for (let i = 0; i < dbaRow.length; i++) {
-      const dba = dbaRow[i];
-      if (!dba || dba === 'Total') continue;
-      const name = DBA_MAP[dba.toLowerCase().trim()];
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      const v: Record<string, string> = {};
-      for (const r of metricRows) v[r.label] = r.cells[i] ?? '';
-      let occ = parseNum(v['Occupancy %']);
-      if (occ != null && occ > 0 && occ <= 1) occ = Math.round(occ * 1000) / 10;
-      rows.push({
-        property_name: name, entity_name: '', property_group: GROUP_MAP[name] ?? 'Other', report_date: date,
-        occupancy_pct: occ, adr: parseNum(v['ADR']), revpar: parseNum(v['RevPAR']),
-        room_revenue: parseNum(v['Room Revenue']), fb_revenue: parseNum(v['F&B Revenue']),
-        rooms_occupied: parseNum(v['Rooms Occupied']), rooms_ooo: parseNum(v['Rooms OOO']),
-        rooms_dirty: parseNum(v['Rooms Dirty']), room_nights_reserved: parseNum(v['Room Nights Reserved Today']),
-        no_shows: parseNum(v['No Shows']),
-        ar_up_to_30: parseNum(v['Accounts Up to 30 Days']), ar_over_30: parseNum(v['Accounts Over 30 Days']),
-        ar_over_60: parseNum(v['Accounts Over 60 Days']), ar_over_90: parseNum(v['Accounts Over 90 Days']),
-        ar_over_120: parseNum(v['Accounts Over 120 Days']), ar_total: parseNum(v['AR Total']),
-      });
-    }
-  }
-  return rows;
-}
-
-function parseEngineering(text: string, date: string): Record<string, unknown>[] {
-  const rooms: Record<string, unknown>[] = [];
-  const sheets = text.split(/=== Sheet:\s*/);
-  for (const sheet of sheets) {
-    const firstLine = sheet.split('\n')[0]?.trim() ?? '';
-    const isLongTerm = firstLine.includes('Long Term');
-    if (!firstLine.includes('OOO')) continue;
-    for (const line of sheet.split('\n').slice(1)) {
-      const cells = line.split('\t');
-      const hotel = cells[0]?.trim();
-      const roomNum = cells[1]?.trim();
-      if (!hotel || !roomNum || hotel === 'Hotel' || hotel === 'Engineering Flash') continue;
-      rooms.push({
-        property_name: HOTEL_MAP[hotel.toLowerCase().trim()] ?? hotel,
-        report_date: date, room_number: roomNum,
-        date_ooo: cells[2]?.trim() || null, reason: cells[3]?.trim() || null,
-        notes: cells[4]?.trim() || null, is_long_term: isLongTerm,
-      });
-    }
-  }
-  return rooms;
-}
+// NOTE: the scanner used to carry its own copies of the parsers + name maps.
+// They drifted from the canonical versions in lib/report-parsers.ts and made
+// the "mixing data" bug worse (two different lookups, two different outcomes
+// for the same PDF). Single-source-of-truth parsers come from the shared
+// module now; the scanner just drives the file loop and the upserts.
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -386,56 +200,92 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
       auth: { autoRefreshToken: false, persistSession: false },
     });
 
-    const allDates = [...new Set(
-      results.map((r) => r['dateFolder'] as string).filter(Boolean),
-    )].sort();
+    // Per-file date reconciliation. Filename date is a weak signal — each
+    // file's business date comes from the PDF body (reconcileDates). Files
+    // with no parseable business date are skipped, not force-landed on a
+    // guessed day.
+    const typed = results
+      .map((r) => {
+        const fullText = (r['fullText'] as string | undefined) ?? '';
+        if (!fullText) return null;
+        const filenameDate = (r['dateFolder'] as string | undefined) ?? null;
+        const fileName = (r['fileName'] as string | undefined) ?? '';
+        const lowerName = fileName.toLowerCase();
+        const reportType = r['reportType'] as string | undefined;
+
+        let kind: 'revenue-flash' | 'flash-report' | 'engineering' | null = null;
+        if (reportType === 'Revenue Flash' || lowerName.includes('revenue flash')) kind = 'revenue-flash';
+        else if (lowerName.includes('flash report') && !lowerName.includes('revenue')) kind = 'flash-report';
+        else if (lowerName.includes('engineering flash') && !lowerName.includes('template')) kind = 'engineering';
+        if (!kind) return null;
+
+        const category =
+          kind === 'engineering' ? 'Maintenance' : 'Revenue';
+        const reconciled = reconcileDates({ filenameDate, fullText, category });
+        const businessDate = reconciled.businessDate ?? filenameDate;
+        if (!businessDate) return null;
+
+        return {
+          kind,
+          fileName,
+          fullText,
+          businessDate,
+          extension: (r['extension'] as string | undefined) ?? '',
+          warnings: reconciled.warnings,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
 
     let totalRF = 0;
     let totalFR = 0;
     let totalEng = 0;
     const errors: string[] = [];
+    const distinctDates = new Set<string>();
 
-    for (const date of allDates) {
-      // Revenue Flash
-      const rfFiles = results
-        .filter((r) => r['dateFolder'] === date && r['reportType'] === 'Revenue Flash' && r['fullText'])
-        .sort((a, b) => ((b['fullText'] as string)?.length ?? 0) - ((a['fullText'] as string)?.length ?? 0));
+    // Group by (kind, businessDate) so we pick the "best" file per cohort.
+    const buckets = new Map<string, typeof typed>();
+    for (const entry of typed) {
+      distinctDates.add(entry.businessDate);
+      const key = `${entry.kind}::${entry.businessDate}`;
+      const arr = buckets.get(key) ?? [];
+      arr.push(entry);
+      buckets.set(key, arr);
+    }
 
-      const rfRows: Record<string, unknown>[] = [];
-      const rfSeen = new Set<string>();
-      for (const rf of rfFiles) {
-        for (const row of parseRevenueFlash(rf['fullText'] as string, date)) {
-          if (!rfSeen.has(row['property_name'] as string)) {
-            rfSeen.add(row['property_name'] as string);
-            rfRows.push(row);
+    const nowIso = new Date().toISOString();
+
+    for (const [key, entries] of buckets.entries()) {
+      const kind = key.split('::')[0] as 'revenue-flash' | 'flash-report' | 'engineering';
+      const date = key.split('::')[1]!;
+
+      if (kind === 'revenue-flash') {
+        // Prefer the longest fullText — most complete file.
+        const sorted = [...entries].sort((a, b) => b.fullText.length - a.fullText.length);
+        const rows: Record<string, unknown>[] = [];
+        const seen = new Set<string>();
+        for (const rf of sorted) {
+          for (const row of parseRevenueFlash(rf.fullText, date)) {
+            const name = row['property_name'] as string;
+            if (seen.has(name)) continue;
+            seen.add(name);
+            rows.push({ ...row, extracted_at: nowIso });
           }
         }
-      }
-
-      if (rfRows.length > 0) {
-        const { error } = await supabase
-          .from('daily_hotel_performance')
-          .upsert(rfRows, { onConflict: 'property_name,report_date' });
-        if (error) errors.push(`RF ${date}: ${error.message}`);
-        else totalRF += rfRows.length;
-      }
-
-      // Flash Report
-      const frFiles = results
-        .filter((r) =>
-          r['dateFolder'] === date &&
-          (r['fileName'] as string)?.toLowerCase().includes('flash report') &&
-          !(r['fileName'] as string)?.toLowerCase().includes('revenue') &&
-          r['fullText'],
-        )
-        .sort((a, b) => {
-          const ap = (a['extension'] as string) === '.pdf' ? 1 : 0;
-          const bp = (b['extension'] as string) === '.pdf' ? 1 : 0;
+        if (rows.length > 0) {
+          const { error } = await supabase
+            .from('daily_hotel_performance')
+            .upsert(rows, { onConflict: 'property_name,report_date' });
+          if (error) errors.push(`RF ${date}: ${error.message}`);
+          else totalRF += rows.length;
+        }
+      } else if (kind === 'flash-report') {
+        // Prefer PDF over other extensions, then largest.
+        const sorted = [...entries].sort((a, b) => {
+          const ap = a.extension === '.pdf' ? 1 : 0;
+          const bp = b.extension === '.pdf' ? 1 : 0;
           return bp - ap;
         });
-
-      if (frFiles.length > 0) {
-        const frRows = parseFlashReport(frFiles[0]!['fullText'] as string, date);
+        const frRows = parseFlashReport(sorted[0]!.fullText, date).map((r) => ({ ...r, extracted_at: nowIso }));
         if (frRows.length > 0) {
           const { error } = await supabase
             .from('flash_report')
@@ -443,20 +293,9 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
           if (error) errors.push(`FR ${date}: ${error.message}`);
           else totalFR += frRows.length;
         }
-      }
-
-      // Engineering Flash
-      const engFiles = results
-        .filter((r) =>
-          r['dateFolder'] === date &&
-          (r['fileName'] as string)?.toLowerCase().includes('engineering flash') &&
-          !(r['fileName'] as string)?.toLowerCase().includes('template') &&
-          r['fullText'],
-        )
-        .sort((a, b) => ((b['fullText'] as string)?.length ?? 0) - ((a['fullText'] as string)?.length ?? 0));
-
-      if (engFiles.length > 0) {
-        const engRows = parseEngineering(engFiles[0]!['fullText'] as string, date);
+      } else {
+        const sorted = [...entries].sort((a, b) => b.fullText.length - a.fullText.length);
+        const engRows = parseEngineering(sorted[0]!.fullText, date).map((r) => ({ ...r, extracted_at: nowIso }));
         if (engRows.length > 0) {
           const { error } = await supabase
             .from('engineering_ooo_rooms')
@@ -470,7 +309,7 @@ export async function scannerRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       success: errors.length === 0,
       data: {
-        dates: allDates.length,
+        dates: distinctDates.size,
         revenueFlash: totalRF,
         flashReport: totalFR,
         engineering: totalEng,
